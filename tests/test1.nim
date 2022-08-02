@@ -31,7 +31,7 @@ proc bar(yo: string) {.async.} =
 waitFor bar("hi")
 
 expectOutput """
-Bar env size: 128
+Bar env size: 136
 """
 
 type BarEnv = asyncCallEnvType bar("hi")

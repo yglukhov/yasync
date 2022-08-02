@@ -2,7 +2,7 @@ import macros, tables, hashes
 
 type
   ProcType = proc(e: pointer) {.gcsafe, nimcall.}
-  ContBase = object {.inheritable.}
+  ContBase {.inheritable.} = object# {.inheritable.}
     `<state_reserved>`: int
     `<p>`: ProcType
     `<e>2`: ptr ContBase
@@ -63,12 +63,10 @@ proc launchf(p: ptr ContBase): bool {.inline.} =
 proc complete*[T](resFut: ptr Cont[T], v: T) =
   resFut.`<state_reserved>` = -1
   resFut.result = v
-  # resume(resFut.e)
   resume(resFut)
 
 proc complete*(resFut: ptr Cont[void]) =
   resFut.`<state_reserved>` = -1
-  # resume(resFut.`<e>2`)
   resume(resFut)
 
 proc complete*[T](resFut: Future[T], v: T) {.inline.} =
@@ -97,8 +95,8 @@ proc read*(resFut: Future[void]) =
   checkFinished(cast[ptr ContBase](resFut))
 
 proc readAux[T](a: T): auto {.inline.} =
-  when compiles(a.result4):
-    a.result4
+  when compiles(a.result5):
+    a.result5
   else:
     discard
 
@@ -106,11 +104,9 @@ template contSubstate(s: untyped): untyped =
   if launchf(cast[ptr ContBase](addr s)):
     yield
   checkFinished(cast[ptr ContBase](addr s))
-  # when compiles(s.`<asyncresult>3`):
   readAux(s)
-  # s.`<asyncresult>3`
 
-template this_env(a: typed): ptr ContBase =
+template thisEnv(a: typed): ptr ContBase =
   cast[ptr ContBase](cast[int](addr(a)) - sizeof(int) * 2)
 
 type
@@ -139,7 +135,6 @@ iterator arguments(formalParams: NimNode): tuple[idx: int, name, typ, default: N
 proc processArguments(prc: NimNode): NimNode =
   result = newNimNode(nnkVarSection)
   for i, n, t, d in arguments(prc.params):
-    # result.add(newIdentDefs(newTree(nnkPragmaExpr, ident($n), newTree(nnkPragma, ident"noinit")), t))
     result.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
 
 proc transformReturnStmt(n, resSym: NimNode): NimNode =
@@ -159,8 +154,8 @@ macro argFieldAccess(o: typed, idx: static[int]): untyped =
   let t = getType(o)
   t.expectKind(nnkObjectTy)
   let rl = t[2]
-  var idx = idx + 4
-  if $rl[4] == "result4": inc idx
+  var idx = idx + 5
+  if $rl[5] == "result5": inc idx
   result = newDotExpr(o, rl[idx])
 
 template fillArg[TEnv, TArg](e: var TEnv, idx: int, arg: TArg) =
@@ -189,7 +184,6 @@ template realAwait(f: Future[void], thisEnv: ptr ContBase) =
   tmpFut.read()
 
 proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
-  var optimizeAwait = false
   let pSym = ident("<p>")
   if n.kind == nnkCall and n[0].kind == nnkSym:
     let data = asyncData.getOrDefault(n[0])
@@ -254,13 +248,15 @@ macro asyncClosure3(c: untyped): untyped =
   c.body = processAsync(c.body, objStateRecCase)
   objStateRecCase.add newTree(nnkElse, newNilLit())
   let insertion = newNimNode(nnkStmtList)
-  let subIdent = ident"sub"
-  insertion.add newTree(nnkTypeSection, newTree(nnkTypeDef, ident"Substates", newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))))
-  insertion.add quote do:
-    var `subIdent`: Substates
+  if objStateRecCase.len > 2:
+    # The reccase is not empty meaning there are substates
+    let subIdent = ident"sub"
+    insertion.add newTree(nnkTypeSection, newTree(nnkTypeDef, ident"Substates", newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))))
+    insertion.add quote do:
+      var `subIdent`: Substates
   c.body[stateObjInsertionPoint] = insertion
   # echo repr objStateRecCase
-  echo "CLOS2: ", repr result
+  # echo "CLOS2: ", repr result
 
 macro asyncClosure2(c: typed): untyped =
   newCall(bindSym"asyncClosure3", c)
@@ -293,7 +289,6 @@ proc makeAsyncWrapper(prc, iterSym, procPtrVar: NimNode): NimNode =
   if retType.kind == nnkEmpty:
     retType = ident"void"
   prc.params[0] = newTree(nnkBracketExpr, bindSym"Future", retType)
-  let paramsCount = prc.params.len
 
   let fillArgs = newNimNode(nnkStmtList)
 
@@ -315,8 +310,8 @@ proc makeAsyncWrapper(prc, iterSym, procPtrVar: NimNode): NimNode =
 proc asyncProc(prc: NimNode): NimNode =
   let prcName = prc.name
   var data: AsyncProcData
-  let procPtrVar = genSym(nskVar, $prcName & "_procPtr")
-  let iterSym = genSym(nskIterator, $prcName & "_iter")
+  let procPtrVar = genSym(nskVar, $prcName & ":procPtr")
+  let iterSym = genSym(nskIterator, $prcName & ":iter")
   data.procPtrVar = procPtrVar
   data.iterSym = iterSym
 
@@ -354,7 +349,7 @@ proc asyncProc(prc: NimNode): NimNode =
 
     `wrapper`
 
-  echo repr result
+  # echo repr result
 
 macro asyncRaw2(prc: typed): untyped =
   let s = prc.name
@@ -365,7 +360,6 @@ macro asyncRaw2(prc: typed): untyped =
   result = prc
 
 macro asyncRaw*(prc: untyped): untyped =
-  let retType = prc.params[0] or ident"void"
   prc.params[0] = newEmptyNode()
   result = newCall(bindSym"asyncRaw2", prc)
 

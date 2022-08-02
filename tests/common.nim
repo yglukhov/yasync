@@ -1,3 +1,4 @@
+import std/exitprocs
 import yasync
 from asyncdispatch import nil
 
@@ -25,13 +26,11 @@ proc expectOutput*(v: string) =
   expectedOutput = v
   logBuffer = ""
 
-proc onQuit() {.noconv.} =
+addExitProc do():
   checkOutput()
   echo "OK"
 
-addQuitProc(onQuit)
-
-proc sleep(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
+proc sleep*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
     env.complete()
 

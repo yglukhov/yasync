@@ -39,7 +39,7 @@ exception
 
 try:
   waitFor bar()
-except Exception as e:
+except Exception:
   log "exception"
 
 expectOutput """
@@ -50,7 +50,7 @@ exception
 
 try:
   waitFor foo()
-except Exception as e:
+except Exception:
   log "exception"
 
 expectOutput """
@@ -60,5 +60,26 @@ exception
 
 try:
   waitFor baz()
-except Exception as e:
+except Exception:
+  log "exception"
+
+expectOutput """
+1
+raising
+caught in barr
+2
+"""
+
+proc barr() {.async.} =
+  await sleep(10)
+  log 1
+  try:
+    await baz()
+  except Exception:
+    log "caught in barr"
+  log 2
+
+try:
+  waitFor barr()
+except Exception:
   log "exception"
