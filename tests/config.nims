@@ -4,4 +4,4 @@ switch("path", "$projectDir/..")
 # --debugger:native
 --passC:"-g"
 --threads:on
---stackTrace:off
+# --stackTrace:off

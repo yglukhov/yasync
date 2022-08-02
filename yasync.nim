@@ -43,7 +43,13 @@ proc resume(p: ptr ContBase) =
       let f = p.`<p>`
       if f.isNil:
         break
-      f(p)
+      try:
+        f(p)
+      except Exception as e:
+        # Closure iterators throwing exceptions do not necessarily have finished state
+        # so fix it here
+        p.`<state_reserved>` = -1
+        p.error = e
       if not p.finished:
         break
 
@@ -71,22 +77,24 @@ proc complete*[T](resFut: Future[T], v: T) {.inline.} =
 proc complete*(resFut: Future[void]) {.inline.} =
   complete(cast[ptr Cont[void]](resFut))
 
-proc checkFinished(resFut: ptr ContBase) =
+proc checkFinished(resFut: ptr ContBase) {.stackTrace: off.} =
   assert(resFut.finished)
+  if not resFut.error.isNil:
+    raise resFut.error
 
 proc read[T](resFut: Cont[T]): T =
-  assert(resFut.finished)
+  checkFinished(addr resFut)
   resFut.result
 
 proc read(resFut: Cont[void]) =
-  assert(resFut.finished)
+  checkFinished(addr resFut)
 
 proc read*[T](resFut: Future[T]): T =
-  assert(resFut.finished)
+  checkFinished(resFut)
   resFut.result
 
 proc read*(resFut: Future[void]) =
-  assert(resFut.finished)
+  checkFinished(cast[ptr ContBase](resFut))
 
 proc readAux[T](a: T): auto {.inline.} =
   when compiles(a.result4):
@@ -317,6 +325,7 @@ proc asyncProc(prc: NimNode): NimNode =
   let pSym = ident"<p>"
   let eSym = ident"<e>"
   let isAllocatedSym = ident"<isAllocated>"
+  let errorSym = ident"<error>"
   let resultSym = ident"result"
 
   let argDefs = processArguments(prc)
@@ -327,6 +336,7 @@ proc asyncProc(prc: NimNode): NimNode =
       var `pSym` {.noinit, used.}: ProcType
       var `eSym` {.noinit, used.}: ptr ContBase
       var `isAllocatedSym` {.noinit, used.}: bool
+      var `errorSym` {.noinit, used.}: ref Exception
       when `resultType` isnot void:
         var `resultSym`: `resultType`
       `argDefs`
