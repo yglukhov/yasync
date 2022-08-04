@@ -45,11 +45,9 @@ a: 2
 a: 1
 """
 
-proc recursive1(a: int): Future[void]
-
 proc recursive1(a: int) {.async.} =
   if a > 0:
-    await sleep(100)
+    await sleep(10)
     log "a: ", a
     await recursive1(a - 1)
 

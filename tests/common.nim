@@ -1,4 +1,4 @@
-import std/exitprocs
+import std/[exitprocs, strutils]
 import yasync
 from asyncdispatch import nil
 
@@ -23,7 +23,7 @@ proc checkOutput() =
 
 proc expectOutput*(v: string) =
   checkOutput()
-  expectedOutput = v
+  expectedOutput = v.unindent
   logBuffer = ""
 
 addExitProc do():
@@ -40,7 +40,10 @@ proc sleep*(ms: int): Future[void] =
   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
     res.complete()
 
-proc waitFor*[T](f: Future[T]): T =
+proc waitForButDontRead*(f: FutureBase) =
   while not f.finished:
     asyncdispatch.poll()
+
+proc waitFor*[T](f: Future[T]): T =
+  waitForButDontRead(f)
   f.read()

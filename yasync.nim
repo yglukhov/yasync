@@ -13,8 +13,9 @@ type
     when T is void:
       discard
     else:
-      result: T
+      result*: T
 
+  FutureBase* = ref ContBase
   Future*[T] = ref Cont[T]
 
 proc finished(f: ContBase): bool {.inline.} = f.`<state_reserved>` < 0
@@ -75,6 +76,46 @@ proc complete*[T](resFut: Future[T], v: T) {.inline.} =
 proc complete*(resFut: Future[void]) {.inline.} =
   complete(cast[ptr Cont[void]](resFut))
 
+proc fail(resFut: ptr ContBase, err: ref Exception) =
+  resFut.`<state_reserved>` = -1
+  resFut.error = err
+  resume(resFut)
+
+proc fail*(resFut: ref ContBase, err: ref Exception) {.inline.} =
+  fail(cast[ptr ContBase](resFut), err)
+
+type
+  CB[T] = ref object of ContBase
+    cb: proc(v: T, error: ref Exception)
+    f: Future[T]
+
+  CBVoid = ref object of ContBase
+    cb: proc(error: ref Exception)
+    f: Future[void]
+
+proc onComplete[T](p: ptr ContBase) =
+  when T is void:
+    let p = cast[CBVoid](p)
+    p.cb(p.f.error)
+  else:
+    let p = cast[CB[T]](p)
+    p.cb(p.f.result, p.f.error)
+  GC_unref(p)
+
+proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception)) =
+  assert(f.`<e>2`.isNil, "Future already has a callback")
+  var c = CB[T](f: f, cb: cb)
+  GC_ref(c)
+  c.`<p>` = cast[ProcType](onComplete[T])
+  f.`<e>2` = cast[ptr ContBase](c)
+
+proc then*(f: Future[void], cb: proc(error: ref Exception)) =
+  assert(f.`<e>2`.isNil, "Future already has a callback")
+  var c = CBVoid(f: f, cb: cb)
+  GC_ref(c)
+  c.`<p>` = cast[ProcType](onComplete[void])
+  f.`<e>2` = cast[ptr ContBase](c)
+
 proc checkFinished(resFut: ptr ContBase) {.stackTrace: off.} =
   assert(resFut.finished)
   if not resFut.error.isNil:
@@ -88,7 +129,7 @@ proc read(resFut: Cont[void]) =
   checkFinished(addr resFut)
 
 proc read*[T](resFut: Future[T]): T =
-  checkFinished(resFut)
+  checkFinished(cast[ptr ContBase](resFut))
   resFut.result
 
 proc read*(resFut: Future[void]) =
@@ -237,7 +278,7 @@ proc processAsync(n, stateObj: NimNode): NimNode =
 
 macro asyncClosure3(c: untyped): untyped =
   result = c
-  # echo "CLOS2: ", treerepr result
+  # echo "CLOS3: ", treerepr result
   var stateObjInsertionPoint = -1
   for i, n in c.body:
     if n.kind == nnkCommentStmt and $n == "<STATE OBJ INSERTION POINT>":
@@ -269,17 +310,16 @@ proc closureEnvType(a: NimNode): NimNode =
 macro getClosureEnvType(a: typed): untyped =
   result = closureEnvType(a)
 
-macro registerAsyncWrapper(prc: typed, iterSym: typed, procPtrVar: typed): untyped =
-  result = prc
-  asyncData[prc.name] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), iterSym: iterSym, procPtrVar: procPtrVar)
+macro registerAsyncData(dummyCall: typed, procPtr: typed, iterSym: typed): untyped =
+  asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), iterSym: iterSym, procPtrVar: procPtr)
 
 macro asyncCallEnvType*(call: typed): untyped =
   let d = asyncData.getOrDefault(call[0])
   assert(d.envType != nil, "Env type not found")
   return d.envType
 
-proc makeAsyncWrapper(prc, iterSym, procPtrVar: NimNode): NimNode =
-  result = newCall(bindSym"registerAsyncWrapper", prc, iterSym, procPtrVar)
+proc makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl: NimNode): NimNode =
+  result = prc
   let getClosureEnvType = bindSym"getClosureEnvType"
   let markAllocatedEnv = bindSym"markAllocatedEnv"
   let launchSym = bindSym"launch"
@@ -292,28 +332,35 @@ proc makeAsyncWrapper(prc, iterSym, procPtrVar: NimNode): NimNode =
 
   let fillArgs = newNimNode(nnkStmtList)
 
+  let dummySelfCall = newCall(prc.name)
+
   # Fill arguments
   for i, n, t, d in arguments(prc.params):
     fillArgs.add newCall(bindSym"fillArgPtr", envSym, newLit(i), n)
+    dummySelfCall.add(n)
+
+  let getIterPtr = genSym(nskProc, "getIterPtr")
 
   prc.body = quote do:
-    # let `envSym` = `allocateAsyncResult`(`envSym`, result)
+    asyncClosure2(`iterDecl`)
+    var iterPtr {.global.} = cast[ProcType](rawProc(`iterSym`))
+    proc `getIterPtr`(): ProcType {.stackTrace: off.} =
+      return iterPtr
+    registerAsyncData(`dummySelfCall`, `getIterPtr`(), `iterSym`)
+
     var `envSym`: ref `getClosureEnvType`(`iterSym`)
     `envSym`.new()
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
-    `envSym`.`p1sym` = `procPtrVar`
+    `envSym`.`p1sym` = `getIterPtr`()
     `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
 proc asyncProc(prc: NimNode): NimNode =
   let prcName = prc.name
-  var data: AsyncProcData
   let procPtrVar = genSym(nskVar, $prcName & ":procPtr")
   let iterSym = genSym(nskIterator, $prcName & ":iter")
-  data.procPtrVar = procPtrVar
-  data.iterSym = iterSym
 
   var resultType = prc.params[0] or ident"void"
 
@@ -333,21 +380,14 @@ proc asyncProc(prc: NimNode): NimNode =
       var `isAllocatedSym` {.noinit, used.}: bool
       var `errorSym` {.noinit, used.}: ref Exception
       when `resultType` isnot void:
+        {.push warning[ResultShadowed]: off.}
         var `resultSym`: `resultType`
+        {.pop.}
       `argDefs`
       ##<STATE OBJ INSERTION POINT>
       `body`
 
-  let wrapper = makeAsyncWrapper(prc, iterSym, procPtrVar)
-
-  result = quote do:
-    var `procPtrVar`: ProcType
-
-    asyncClosure2(`iterDecl`)
-
-    `procPtrVar` = cast[ProcType](rawProc(`iterSym`))
-
-    `wrapper`
+  result = makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl)
 
   # echo repr result
 
@@ -368,5 +408,12 @@ macro async*(prc: untyped): untyped =
   of nnkProcDef: asyncProc(prc)
   else: nil
 
-template await*[T](f: ref Cont[T]): T = dummyAwaitMarkerMagic(f)
-template await*(f: ref Cont[void]) = dummyAwaitMarkerMagic(f)
+template await*[T](f: ref Cont[T]): T =
+  if false:
+    discard f
+  dummyAwaitMarkerMagic(f)
+
+template await*(f: ref Cont[void]) =
+  if false:
+    discard f
+  dummyAwaitMarkerMagic(f)
