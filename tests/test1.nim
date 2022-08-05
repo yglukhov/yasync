@@ -14,6 +14,7 @@ proc foo(a: int) {.async.} =
   await sleep(10)
   log 1
   await sleep(10)
+  await sleep(10)
   log "bye: ", a
 
 proc bar(yo: string) {.async.} =

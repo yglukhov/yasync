@@ -218,19 +218,19 @@ proc dummyAwaitMarkerMagic[T](f: Future[T]): T = discard
 proc setThisEnvToFuture(f, env: ptr ContBase) {.inline.} =
   f.`<e>2` = env
 
-template realAwait[T](f: Future[T], thisEnv: ptr ContBase): T =
-  let tmpFut = f
+template realAwait[T](f: Future[T], thisEnv: ptr ContBase, tmpFut: var FutureBase): T =
+  tmpFut = f
   if not tmpFut.finished:
     setThisEnvToFuture(cast[ptr ContBase](tmpFut), thisEnv)
     yield
-  tmpFut.read()
+  cast[Future[T]](tmpFut).read()
 
-template realAwait(f: Future[void], thisEnv: ptr ContBase) =
-  let tmpFut = f
+template realAwait(f: Future[void], thisEnv: ptr ContBase, tmpFut: var FutureBase) =
+  tmpFut = f
   if not tmpFut.finished:
     setThisEnvToFuture(cast[ptr ContBase](tmpFut), thisEnv)
     yield
-  tmpFut.read()
+  cast[Future[void]](tmpFut).read()
 
 proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
   let pSym = ident("<p>")
@@ -272,7 +272,20 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       result = res
 
   if result.isNil:
-    result = newCall(bindSym"realAwait", n, newCall(bindSym"thisEnv", pSym))
+    # Find state corresponding to tmpFut
+    var state = -1
+    for i, n in stateObj:
+      if n.kind == nnkOfBranch and $n[1][0] == "tmpFut":
+        state = i - 1
+    if state < 0:
+      state = stateObj.len - 1
+      stateObj.add newTree(nnkOfBranch, newLit(state), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
+
+    let realAwait = bindSym"realAwait"
+    let thisEnv = bindSym"thisEnv"
+    result = quote do:
+      sub = Substates(sub: `state`)
+      `realAwait`(`n`, `thisEnv`(`pSym`), sub.tmpFut)
 
   assert(not result.isNil, "Internal error")
 
@@ -424,7 +437,6 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
 macro asyncRaw2(prc: typed): untyped =
   let s = prc.name
   var lastArgType = prc.params[^1][^2]
-  # let ptrBase = newCall(bindSym"pointerBase", lastArgType)
   let ptrBase = lastArgType[^1]
   asyncData[s] = AsyncProcData(envType: ptrBase)
   result = prc
