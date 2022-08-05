@@ -44,7 +44,7 @@ proc waitForButDontRead*(f: FutureBase) =
   while not f.finished:
     asyncdispatch.poll()
 
-proc waitForAux*[T](f: Future[T]): T =
+proc waitForAux[T](f: Future[T]): T =
   waitForButDontRead(f)
   f.read()
 

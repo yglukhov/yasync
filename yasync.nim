@@ -334,14 +334,15 @@ macro getClosureEnvType(a: typed): untyped =
 macro registerAsyncData(dummyCall: typed, procPtr: typed, iterSym: typed): untyped =
   asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), iterSym: iterSym, procPtrVar: procPtr)
 
-macro asyncCallEnvType*(call: Future{nkCall}): untyped =
+macro asyncCallEnvType*(call: Future): untyped =
   ## Returns type of async environment for the `call`
   ## This type can be used with `asyncLaunchWithEnv`
-  ## Returns `void` if the call can not be rewritten to `asyncLaunchWithEnv`
-  let d = asyncData.getOrDefault(call[0])
-  if d.envType == nil:
-    return ident"void"
-  return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
+  ## Returns `void` if the `call` can not be rewritten to `asyncLaunchWithEnv`
+  if call.kind == nnkCall:
+    let d = asyncData.getOrDefault(call[0])
+    if d.envType != nil:
+      return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
+  return ident"void"
 
 proc makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl: NimNode): NimNode =
   result = prc
