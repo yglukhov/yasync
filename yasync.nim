@@ -18,9 +18,13 @@ type
   FutureBase* = ref ContBase
   Future*[T] = ref Cont[T]
 
+  AsyncEnv*[T] = object
+    env*: T
+
 proc finished(f: ContBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished(f: ptr ContBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished*(f: ref ContBase): bool {.inline.} = f.`<state_reserved>` < 0
+proc finished*(f: AsyncEnv): bool {.inline.} = cast[ptr ContBase](addr f).`<state_reserved>` < 0
 
 proc newFuture*(T: typedesc): Future[T] =
   result.new()
@@ -140,6 +144,10 @@ proc readAux[T](a: T): auto {.inline.} =
     a.result5
   else:
     discard
+
+proc read*(resFut: AsyncEnv): auto =
+  checkFinished(cast[ptr ContBase](addr resFut))
+  readAux(resFut.env)
 
 template contSubstate(s: untyped): untyped =
   if launchf(cast[ptr ContBase](addr s)):
@@ -313,10 +321,14 @@ macro getClosureEnvType(a: typed): untyped =
 macro registerAsyncData(dummyCall: typed, procPtr: typed, iterSym: typed): untyped =
   asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), iterSym: iterSym, procPtrVar: procPtr)
 
-macro asyncCallEnvType*(call: typed): untyped =
+macro asyncCallEnvType*(call: Future{nkCall}): untyped =
+  ## Returns type of async environment for the `call`
+  ## This type can be used with `asyncLaunchWithEnv`
+  ## Returns `void` if the call can not be rewritten to `asyncLaunchWithEnv`
   let d = asyncData.getOrDefault(call[0])
-  assert(d.envType != nil, "Env type not found")
-  return d.envType
+  if d.envType == nil:
+    return ident"void"
+  return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
 
 proc makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl: NimNode): NimNode =
   result = prc
@@ -389,7 +401,25 @@ proc asyncProc(prc: NimNode): NimNode =
 
   result = makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl)
 
-  # echo repr result
+macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
+  call.expectKind(nnkCall)
+  let s = call[0]
+  s.expectKind(nnkSym)
+  let data = asyncData[s]
+  let iterPtr = data.procPtrVar
+  let fillArgs = newNimNode(nnkStmtList)
+  let p1Sym = ident("<p>1")
+  let launchSym = bindSym"launch"
+  let envAccess = newTree(nnkDotExpr, env, ident"env")
+
+  # Fill arguments
+  for i in 1 ..< call.len:
+    fillArgs.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), call[i])
+  result = quote do:
+    block:
+      `envAccess`.`p1sym` = `iterPtr`
+      `fillArgs`
+      `launchSym`(cast[ptr ContBase](addr `envAccess`))
 
 macro asyncRaw2(prc: typed): untyped =
   let s = prc.name

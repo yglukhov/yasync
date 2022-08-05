@@ -26,7 +26,7 @@ proc bar() {.async.} =
 waitFor bar()
 ```
 
-If we pretend that `sleep` doesn't allocate, the whole `waitFor` operation above will not do a single allocation (TODO: Currently waitFor allocates, but trivial to fix :) ). The optimization happens in `async` functions on `await` calls.
+If we pretend that `sleep` doesn't allocate, the whole `waitFor` operation above will not do a single allocation. The optimization happens in `async` functions on `await` calls.
 
 TODO: Describe how it works in details
 

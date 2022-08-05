@@ -44,6 +44,20 @@ proc waitForButDontRead*(f: FutureBase) =
   while not f.finished:
     asyncdispatch.poll()
 
-proc waitFor*[T](f: Future[T]): T =
+proc waitForAux*[T](f: Future[T]): T =
   waitForButDontRead(f)
   f.read()
+
+template waitFor*[T](f: Future[T]): auto =
+  block:
+    type Env = asyncCallEnvType(f)
+    when Env is void:
+      waitForAux(f)
+    else:
+      if false:
+        discard f
+      var e: Env
+      asyncLaunchWithEnv(e, f)
+      while not e.finished:
+        asyncdispatch.poll()
+      e.read()

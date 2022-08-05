@@ -1,8 +1,5 @@
 import yasync
-# import yasync/compat
 import ./common
-# import httpclient
-# from asyncdispatch import nil
 
 expectOutput """
 yo: hi
@@ -17,10 +14,6 @@ proc foo(a: int) {.async.} =
   await sleep(10)
   log 1
   await sleep(10)
-  # let c = newAsyncHttpClient()
-  # let cn = awaitc c.getContent("https://google.com")
-  # echo cn
-  # bar("yo")
   log "bye: ", a
 
 proc bar(yo: string) {.async.} =
