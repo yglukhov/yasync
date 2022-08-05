@@ -4,9 +4,10 @@ import ./common
 expectOutput """
 10
 """
+
 proc foo(): int {.async.} =
   await sleep(10)
-  result = 10
+  10
 
 log waitFor foo()
 

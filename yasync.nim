@@ -160,8 +160,7 @@ template thisEnv(a: typed): ptr ContBase =
 
 type
   AsyncProcData = object
-    procPtrVar: NimNode # Symbol of proc ptr
-    iterSym: NimNode
+    procPtr: NimNode # Symbol of proc ptr
     envType: NimNode
 
 proc hash(n: NimNode): Hash = hash($n)
@@ -247,9 +246,9 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
         sub = Substates(sub: `i`)
         sub.`subId`.`eSym` = thisEnv(`pSym`)
 
-      let procPtrVar = data.procPtrVar
+      let procPtr = data.procPtr
       let envAccess = newDotExpr(ident"sub", subId)
-      if procPtrVar == nil:
+      if procPtr.isNil:
         # Call raw
         # Replace last parameter with addr env
         n[^1] = newCall("addr", envAccess)
@@ -261,7 +260,7 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       else:
         # Call async.
         res.add quote do:
-          sub.`subId`.`p1Sym` = `procPtrVar`
+          sub.`subId`.`p1Sym` = `procPtr`
 
         # Fill arguments
         for i in 1 ..< n.len:
@@ -332,7 +331,7 @@ macro getClosureEnvType(a: typed): untyped =
   result = closureEnvType(a)
 
 macro registerAsyncData(dummyCall: typed, procPtr: typed, iterSym: typed): untyped =
-  asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), iterSym: iterSym, procPtrVar: procPtr)
+  asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), procPtr: procPtr)
 
 macro asyncCallEnvType*(call: Future): untyped =
   ## Returns type of async environment for the `call`
@@ -344,7 +343,7 @@ macro asyncCallEnvType*(call: Future): untyped =
       return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
   return ident"void"
 
-proc makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl: NimNode): NimNode =
+proc makeAsyncWrapper(prc, iterSym, procPtr, iterDecl: NimNode): NimNode =
   result = prc
   let getClosureEnvType = bindSym"getClosureEnvType"
   let markAllocatedEnv = bindSym"markAllocatedEnv"
@@ -383,9 +382,20 @@ proc makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl: NimNode): NimNode =
     `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
+template assignResult[T](v: T) =
+  when T is void:
+    v
+  else:
+    result = v
+
+proc fixupLastReturnStmt(body: NimNode): NimNode =
+  if body.len > 0:
+    body[^1] = newCall(bindSym"assignResult", body[^1])
+  result = body
+
 proc asyncProc(prc: NimNode): NimNode =
   let prcName = prc.name
-  let procPtrVar = genSym(nskVar, $prcName & ":procPtr")
+  let procPtr = genSym(nskVar, $prcName & ":procPtr")
   let iterSym = genSym(nskIterator, $prcName & ":iter")
 
   var resultType = prc.params[0] or ident"void"
@@ -397,7 +407,9 @@ proc asyncProc(prc: NimNode): NimNode =
   let resultSym = ident"result"
 
   let argDefs = processArguments(prc)
-  let body = transformReturnStmt(prc.body, resultSym)
+
+  let body1 = fixupLastReturnStmt(prc.body)
+  let body = transformReturnStmt(body1, resultSym)
 
   let iterDecl = quote do:
     iterator `iterSym`() {.closure.} =
@@ -413,14 +425,14 @@ proc asyncProc(prc: NimNode): NimNode =
       ##<STATE OBJ INSERTION POINT>
       `body`
 
-  result = makeAsyncWrapper(prc, iterSym, procPtrVar, iterDecl)
+  result = makeAsyncWrapper(prc, iterSym, procPtr, iterDecl)
 
 macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
   call.expectKind(nnkCall)
   let s = call[0]
   s.expectKind(nnkSym)
   let data = asyncData[s]
-  let iterPtr = data.procPtrVar
+  let iterPtr = data.procPtr
   let fillArgs = newNimNode(nnkStmtList)
   let p1Sym = ident("<p>1")
   let launchSym = bindSym"launch"
