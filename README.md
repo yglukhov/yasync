@@ -1,6 +1,6 @@
 # yasync - Yet another async/await for Nim [![Build Status](https://github.com/yglukhov/yasync/workflows/CI/badge.svg?branch=main)](https://github.com/yglukhov/yasync/actions?query=branch%3Amain)
 
-WARNING: Doesn't work because of https://github.com/nim-lang/Nim/issues/19818, but can be tested with [this hacky patch to Nim](https://github.com/yglukhov/Nim/commit/9758922ae702e0d005756111c9fb0badc3ed90d6).
+WARNING: Doesn't work because of https://github.com/nim-lang/Nim/issues/19818, but can be tested with [this hacky patch to Nim](https://github.com/yglukhov/Nim/tree/hacky-patch-for-yasync).
 
 - Semantics is very close to that of Nim's std `async`, `await` and `Future[T]`.
 - `await` operation doesn't cause any heap allocations (except calling manually-async functions, async closures, and (mutually) recursive calls).
