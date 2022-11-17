@@ -5,3 +5,4 @@ switch("path", "$projectDir/..")
 --passC:"-g"
 --threads:on
 # --stackTrace:off
+--gc:refc # Causes nim codegen bugs with orc :(
