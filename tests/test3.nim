@@ -27,3 +27,10 @@ proc generic1[T](a, b: T, select: bool): T {.async.} =
 
 let a = waitFor generic1(5, 6, false)
 log a
+
+expectOutput """
+hello
+"""
+
+let b = waitFor generic1("bye", "hello", false)
+log b

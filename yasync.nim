@@ -2,11 +2,13 @@ import macros, tables, hashes
 
 type
   ProcType = proc(e: pointer) {.gcsafe, nimcall.}
-  ContBase {.inheritable.} = object# {.inheritable.}
+  ContFlags = enum
+    fAllocated
+  ContBase {.inheritable.} = object
     `<state_reserved>`: int
     `<p>`: ProcType
     `<e>2`: ptr ContBase
-    `<isAllocated>3`: bool
+    `<flags>3`: set[ContFlags]
     error: ref Exception
 
   Cont*[T] = object of ContBase
@@ -30,10 +32,10 @@ proc newFuture*(T: typedesc): Future[T] =
   result.new()
 
 proc markAllocatedEnv(e: ptr ContBase) {.inline.} =
-  e.`<isAllocated>3` = true
+  e.`<flags>3`.incl(fAllocated)
 
 proc isAllocatedEnv(e: ptr ContBase): bool {.inline.} =
-  e.`<isAllocated>3`
+  e.`<flags>3`.contains(fAllocated)
 
 proc resume(p: ptr ContBase) =
   var p = p
@@ -343,7 +345,28 @@ macro asyncCallEnvType*(call: Future): untyped =
       return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
   return ident"void"
 
-proc makeAsyncWrapper(prc, iterSym, procPtr, iterDecl: NimNode): NimNode =
+template getIterPtr(it: typed): ProcType =
+  (proc(): ProcType {.nimcall, inline.} =
+    # The emit is a hacky optimization to avoid calling newObj
+    # this code is performed once per every async function
+    # so should not bee critical
+    when not defined(gcDestructors):
+      {.emit: """
+      struct {
+        struct {
+          TNimType* m_type;
+        } Sup;
+      } dummy;
+      #define newObj(a, b) ((void*)&dummy)
+      """.}
+    result = cast[ProcType](rawProc(it))
+    when not defined(gcDestructors):
+      {.emit: """
+      #undef newObj
+      """.}
+  )()
+
+proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
   result = prc
   let getClosureEnvType = bindSym"getClosureEnvType"
   let markAllocatedEnv = bindSym"markAllocatedEnv"
@@ -364,21 +387,20 @@ proc makeAsyncWrapper(prc, iterSym, procPtr, iterDecl: NimNode): NimNode =
     fillArgs.add newCall(bindSym"fillArgPtr", envSym, newLit(i), n)
     dummySelfCall.add(n)
 
-  let getIterPtr = genSym(nskProc, "getIterPtr")
+  let getIterPtr = bindSym"getIterPtr"
 
   prc.body = quote do:
     asyncClosure2(`iterDecl`)
-    var iterPtr {.global.} = cast[ProcType](rawProc(`iterSym`))
-    proc `getIterPtr`(): ProcType {.stackTrace: off.} =
-      return iterPtr
-    registerAsyncData(`dummySelfCall`, `getIterPtr`(), `iterSym`)
+
+    var iterPtr {.global.}: ProcType = `getIterPtr`(`iterSym`)
+    registerAsyncData(`dummySelfCall`, iterPtr, `iterSym`)
 
     var `envSym`: ref `getClosureEnvType`(`iterSym`)
     `envSym`.new()
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
-    `envSym`.`p1sym` = `getIterPtr`()
+    `envSym`.`p1sym` = iterPtr
     `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
@@ -395,14 +417,13 @@ proc fixupLastReturnStmt(body: NimNode): NimNode =
 
 proc asyncProc(prc: NimNode): NimNode =
   let prcName = prc.name
-  let procPtr = genSym(nskVar, $prcName & ":procPtr")
   let iterSym = genSym(nskIterator, $prcName & ":iter")
 
   var resultType = prc.params[0] or ident"void"
 
   let pSym = ident"<p>"
   let eSym = ident"<e>"
-  let isAllocatedSym = ident"<isAllocated>"
+  let flagsSym = ident"<flags>"
   let errorSym = ident"<error>"
   let resultSym = ident"result"
 
@@ -415,7 +436,7 @@ proc asyncProc(prc: NimNode): NimNode =
     iterator `iterSym`() {.closure.} =
       var `pSym` {.noinit, used.}: ProcType
       var `eSym` {.noinit, used.}: ptr ContBase
-      var `isAllocatedSym` {.noinit, used.}: bool
+      var `flagsSym` {.noinit, used.}: set[ContFlags]
       var `errorSym` {.noinit, used.}: ref Exception
       when `resultType` isnot void:
         {.push warning[ResultShadowed]: off.}
@@ -425,7 +446,7 @@ proc asyncProc(prc: NimNode): NimNode =
       ##<STATE OBJ INSERTION POINT>
       `body`
 
-  result = makeAsyncWrapper(prc, iterSym, procPtr, iterDecl)
+  result = makeAsyncWrapper(prc, iterSym, iterDecl)
 
 macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
   call.expectKind(nnkCall)
