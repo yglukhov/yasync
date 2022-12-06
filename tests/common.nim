@@ -19,7 +19,7 @@ proc checkOutput() =
     echo expectedOutput
     echo "Actual:"
     echo logBuffer
-    assert(false, "Unexpected output")
+    doAssert(false, "Unexpected output")
 
 proc expectOutput*(v: string) =
   checkOutput()

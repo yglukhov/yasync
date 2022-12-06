@@ -24,9 +24,14 @@ proc bar(yo: string) {.async.} =
 
 waitFor bar("hi")
 
-expectOutput """
-Bar env size: 136
-"""
+when defined(gcDestructors):
+  expectOutput """
+  Bar env size: 144
+  """
+else:
+  expectOutput """
+  Bar env size: 136
+  """
 
 type BarEnv = asyncCallEnvType bar("hi")
 log "Bar env size: ", sizeof(BarEnv)
