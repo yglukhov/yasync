@@ -4,12 +4,16 @@ type
   ProcType = proc(e: pointer) {.gcsafe, nimcall.}
   ContFlags = enum
     fAllocated
-  ContBase {.inheritable.} = object
-    `<state_reserved>`: int
-    `<p>`: ProcType
-    `<e>2`: ptr ContBase
-    `<flags>3`: set[ContFlags]
+
+  ContHeader = object
+    p: ProcType
+    e: ptr ContBase
+    flags: set[ContFlags]
     error: ref Exception
+
+  ContBase = object of RootObj
+    `<state_reserved>`: int
+    h: ContHeader
 
   Cont*[T] = object of ContBase
     when T is void:
@@ -25,29 +29,29 @@ type
 
 proc finished(f: ContBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished(f: ptr ContBase): bool {.inline.} = f.`<state_reserved>` < 0
-proc finished*(f: ref ContBase): bool {.inline.} = f.`<state_reserved>` < 0
-proc finished*(f: AsyncEnv): bool {.inline.} = cast[ptr ContBase](addr f).`<state_reserved>` < 0
+proc finished*(f: FutureBase): bool {.inline.} = f.`<state_reserved>` < 0
+proc finished*(f: AsyncEnv): bool {.inline.} = finished(cast[ptr ContBase](addr f))
 
 proc newFuture*(T: typedesc): Future[T] =
   result.new()
 
 proc markAllocatedEnv(e: ptr ContBase) {.inline.} =
-  e.`<flags>3`.incl(fAllocated)
+  e.h.flags.incl(fAllocated)
 
 proc isAllocatedEnv(e: ptr ContBase): bool {.inline.} =
-  e.`<flags>3`.contains(fAllocated)
+  e.h.flags.contains(fAllocated)
 
 proc resume(p: ptr ContBase) =
   var p = p
   while not p.isNil:
     if p.finished:
-      let p1 = p.`<e>2`
+      let p1 = p.h.e
       if isAllocatedEnv(p):
         GC_unref(cast[ref ContBase](p))
 
       p = p1
     else:
-      let f = p.`<p>`
+      let f = p.h.p
       if f.isNil:
         break
       try:
@@ -56,12 +60,12 @@ proc resume(p: ptr ContBase) =
         # Closure iterators throwing exceptions do not necessarily have finished state
         # so fix it here
         p.`<state_reserved>` = -1
-        p.error = e
+        p.h.error = e
       if not p.finished:
         break
 
 proc launch(p: ptr ContBase) {.inline.} =
-  p.`<p>`(p)
+  p.h.p(p)
 
 proc launchf(p: ptr ContBase): bool {.inline.} =
   launch(p)
@@ -84,7 +88,7 @@ proc complete*(resFut: Future[void]) {.inline.} =
 
 proc fail(resFut: ptr ContBase, err: ref Exception) =
   resFut.`<state_reserved>` = -1
-  resFut.error = err
+  resFut.h.error = err
   resume(resFut)
 
 proc fail*(resFut: ref ContBase, err: ref Exception) {.inline.} =
@@ -102,30 +106,30 @@ type
 proc onComplete[T](p: ptr ContBase) =
   when T is void:
     let p = cast[CBVoid](p)
-    p.cb(p.f.error)
+    p.cb(p.f.h.error)
   else:
     let p = cast[CB[T]](p)
-    p.cb(p.f.result, p.f.error)
+    p.cb(p.f.result, p.f.h.error)
   GC_unref(p)
 
 proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception)) =
-  assert(f.`<e>2`.isNil, "Future already has a callback")
+  assert(f.h.e.isNil, "Future already has a callback")
   var c = CB[T](f: f, cb: cb)
   GC_ref(c)
-  c.`<p>` = cast[ProcType](onComplete[T])
-  f.`<e>2` = cast[ptr ContBase](c)
+  c.h.p = cast[ProcType](onComplete[T])
+  f.h.e = cast[ptr ContBase](c)
 
 proc then*(f: Future[void], cb: proc(error: ref Exception)) =
-  assert(f.`<e>2`.isNil, "Future already has a callback")
+  assert(f.h.e.isNil, "Future already has a callback")
   var c = CBVoid(f: f, cb: cb)
   GC_ref(c)
-  c.`<p>` = cast[ProcType](onComplete[void])
-  f.`<e>2` = cast[ptr ContBase](c)
+  c.h.p = cast[ProcType](onComplete[void])
+  f.h.e = cast[ptr ContBase](c)
 
 proc checkFinished(resFut: ptr ContBase) {.stackTrace: off.} =
   assert(resFut.finished)
-  if not resFut.error.isNil:
-    raise resFut.error
+  if not resFut.h.error.isNil:
+    raise resFut.h.error
 
 proc read[T](resFut: Cont[T]): T =
   checkFinished(addr resFut)
@@ -142,8 +146,8 @@ proc read*(resFut: Future[void]) =
   checkFinished(cast[ptr ContBase](resFut))
 
 proc readAux[T](a: T): auto {.inline.} =
-  when compiles(a.result5):
-    a.result5
+  when compiles(a.result2):
+    a.result2
   else:
     discard
 
@@ -157,7 +161,7 @@ template contSubstate(s: untyped): untyped =
   checkFinished(cast[ptr ContBase](addr s))
   readAux(s)
 
-template thisEnv(a: typed): ptr ContBase =
+template thisEnv(a: var ContHeader): ptr ContBase =
   cast[ptr ContBase](cast[int](addr(a)) - sizeof(int) * 2)
 
 type
@@ -204,8 +208,8 @@ macro argFieldAccess(o: typed, idx: static[int]): untyped =
   let t = getType(o)
   t.expectKind(nnkObjectTy)
   let rl = t[2]
-  var idx = idx + 5
-  if $rl[5] == "result5": inc idx
+  var idx = idx + 2
+  if $rl[2] == "result2": inc idx
   result = newDotExpr(o, rl[idx])
 
 template fillArg[TEnv, TArg](e: var TEnv, idx: int, arg: TArg) =
@@ -216,25 +220,16 @@ template fillArgPtr[TEnv, TArg](e: ref TEnv, idx: int, arg: TArg) =
 
 proc dummyAwaitMarkerMagic[T](f: Future[T]): T = discard
 
-proc setThisEnvToFuture(f, env: ptr ContBase) {.inline.} =
-  f.`<e>2` = env
-
-template realAwait[T](f: Future[T], thisEnv: ptr ContBase, tmpFut: var FutureBase): T =
+template realAwait[T](f: Future[T], thisEnv: ptr ContBase, tmpFut: var FutureBase): auto =
   tmpFut = f
   if not tmpFut.finished:
-    setThisEnvToFuture(cast[ptr ContBase](tmpFut), thisEnv)
+    tmpFut.h.e = thisEnv
     yield
   cast[Future[T]](tmpFut).read()
 
-template realAwait(f: Future[void], thisEnv: ptr ContBase, tmpFut: var FutureBase) =
-  tmpFut = f
-  if not tmpFut.finished:
-    setThisEnvToFuture(cast[ptr ContBase](tmpFut), thisEnv)
-    yield
-  cast[Future[void]](tmpFut).read()
-
 proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
-  let pSym = ident("<p>")
+  let hSym = ident("<h>")
+  let thisEnv = bindSym"thisEnv"
   if n.kind == nnkCall and n[0].kind == nnkSym:
     let data = asyncData.getOrDefault(n[0])
     if data.envType != nil:
@@ -242,11 +237,10 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       let subId = ident("sub" & $i)
       stateObj.add newTree(nnkOfBranch, newLit(i), newIdentDefs(subId, data.envType))
       let res = newNimNode(nnkStmtList)
-      let p1Sym = ident("<p>1")
-      let eSym = ident("<e>2")
+      let h1Sym = ident("<h>1")
       res.add quote do:
         sub = Substates(sub: `i`)
-        sub.`subId`.`eSym` = thisEnv(`pSym`)
+        sub.`subId`.`h1Sym`.e = `thisEnv`(`hSym`)
 
       let procPtr = data.procPtr
       let envAccess = newDotExpr(ident"sub", subId)
@@ -262,7 +256,7 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       else:
         # Call async.
         res.add quote do:
-          sub.`subId`.`p1Sym` = `procPtr`
+          sub.`subId`.`h1Sym`.p = `procPtr`
 
         # Fill arguments
         for i in 1 ..< n.len:
@@ -283,10 +277,9 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       stateObj.add newTree(nnkOfBranch, newLit(state), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
 
     let realAwait = bindSym"realAwait"
-    let thisEnv = bindSym"thisEnv"
     result = quote do:
       sub = Substates(sub: `state`)
-      `realAwait`(`n`, `thisEnv`(`pSym`), sub.tmpFut)
+      `realAwait`(`n`, `thisEnv`(`hSym`), sub.tmpFut)
 
   assert(not result.isNil, "Internal error")
 
@@ -349,7 +342,8 @@ template getIterPtr(it: typed): ProcType =
   (proc(): ProcType {.nimcall, inline.} =
     # The emit is a hacky optimization to avoid calling newObj
     # this code is performed once per every async function
-    # so should not bee critical
+    # so should not bee critical. Unfortunately it doesn't work
+    # with orc, as there's no way to prevent destructor call.
     when not defined(gcDestructors):
       {.emit: """
       struct {
@@ -366,16 +360,17 @@ template getIterPtr(it: typed): ProcType =
       """.}
   )()
 
+template setProc(h: var ContHeader, prc: ProcType) = h.p = prc
+
 proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
   result = prc
   let getClosureEnvType = bindSym"getClosureEnvType"
   let markAllocatedEnv = bindSym"markAllocatedEnv"
   let launchSym = bindSym"launch"
-  let p1Sym = ident("<p>1")
+  let h1Sym = ident("<h>1")
   let envSym = ident("env")
-  var retType = prc.params[0]
-  if retType.kind == nnkEmpty:
-    retType = ident"void"
+  let setProc = bindSym("setProc")
+  let retType = prc.params[0] or ident"void"
   prc.params[0] = newTree(nnkBracketExpr, bindSym"Future", retType)
 
   let fillArgs = newNimNode(nnkStmtList)
@@ -392,7 +387,7 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
   prc.body = quote do:
     asyncClosure2(`iterDecl`)
 
-    var iterPtr {.global.}: ProcType = `getIterPtr`(`iterSym`)
+    let iterPtr {.global.}: ProcType = `getIterPtr`(`iterSym`)
     registerAsyncData(`dummySelfCall`, iterPtr, `iterSym`)
 
     var `envSym`: ref `getClosureEnvType`(`iterSym`)
@@ -400,7 +395,7 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
-    `envSym`.`p1sym` = iterPtr
+    `setProc`(`envSym`.`h1Sym`, iterPtr)
     `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
@@ -421,10 +416,7 @@ proc asyncProc(prc: NimNode): NimNode =
 
   var resultType = prc.params[0] or ident"void"
 
-  let pSym = ident"<p>"
-  let eSym = ident"<e>"
-  let flagsSym = ident"<flags>"
-  let errorSym = ident"<error>"
+  let hSym = ident"<h>"
   let resultSym = ident"result"
 
   let argDefs = processArguments(prc)
@@ -434,10 +426,7 @@ proc asyncProc(prc: NimNode): NimNode =
 
   let iterDecl = quote do:
     iterator `iterSym`() {.closure.} =
-      var `pSym` {.noinit, used.}: ProcType
-      var `eSym` {.noinit, used.}: ptr ContBase
-      var `flagsSym` {.noinit, used.}: set[ContFlags]
-      var `errorSym` {.noinit, used.}: ref Exception
+      var `hSym` {.noinit, used.}: ContHeader
       when `resultType` isnot void:
         {.push warning[ResultShadowed]: off.}
         var `resultSym`: `resultType`
@@ -455,7 +444,7 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
   let data = asyncData[s]
   let iterPtr = data.procPtr
   let fillArgs = newNimNode(nnkStmtList)
-  let p1Sym = ident("<p>1")
+  let h1Sym = ident("<h>1")
   let launchSym = bindSym"launch"
   let envAccess = newTree(nnkDotExpr, env, ident"env")
 
@@ -464,7 +453,7 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
     fillArgs.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), call[i])
   result = quote do:
     block:
-      `envAccess`.`p1sym` = `iterPtr`
+      `envAccess`.`h1sym`.p = `iterPtr`
       `fillArgs`
       `launchSym`(cast[ptr ContBase](addr `envAccess`))
 
@@ -481,7 +470,7 @@ macro asyncRaw*(prc: untyped): untyped =
 
 macro async*(prc: untyped): untyped =
   case prc.kind
-  of nnkProcDef: asyncProc(prc)
+  of nnkProcDef, nnkMethodDef: asyncProc(prc)
   else: nil
 
 template await*[T](f: ref Cont[T]): T =
