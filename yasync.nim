@@ -239,7 +239,7 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       let res = newNimNode(nnkStmtList)
       let h1Sym = ident("<h>1")
       res.add quote do:
-        sub = Substates(sub: `i`)
+        sub = Substates(sub: uint8(`i`))
         sub.`subId`.`h1Sym`.e = `thisEnv`(`hSym`)
 
       let procPtr = data.procPtr
@@ -278,7 +278,7 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
 
     let realAwait = bindSym"realAwait"
     result = quote do:
-      sub = Substates(sub: `state`)
+      sub = Substates(sub: uint8(`state`))
       `realAwait`(`n`, `thisEnv`(`hSym`), sub.tmpFut)
 
   assert(not result.isNil, "Internal error")
