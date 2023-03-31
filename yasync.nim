@@ -42,6 +42,7 @@ proc isAllocatedEnv(e: ptr ContBase): bool {.inline.} =
   e.h.flags.contains(fAllocated)
 
 proc resume(p: ptr ContBase) =
+  {.push warning[BareExcept]: off.}
   var p = p
   while not p.isNil:
     if p.finished:
@@ -63,6 +64,7 @@ proc resume(p: ptr ContBase) =
         p.h.error = e
       if not p.finished:
         break
+  {.pop.}
 
 proc launch(p: ptr ContBase) {.inline.} =
   p.h.p(p)

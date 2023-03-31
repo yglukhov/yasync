@@ -39,7 +39,7 @@ exception
 
 try:
   waitFor bar()
-except Exception:
+except ValueError:
   log "exception"
 
 expectOutput """
@@ -50,7 +50,7 @@ exception
 
 try:
   waitFor foo()
-except Exception:
+except ValueError:
   log "exception"
 
 expectOutput """
@@ -60,7 +60,7 @@ exception
 
 try:
   waitFor baz()
-except Exception:
+except ValueError:
   log "exception"
 
 expectOutput """
@@ -75,11 +75,11 @@ proc barr() {.async.} =
   log 1
   try:
     await baz()
-  except Exception:
+  except ValueError:
     log "caught in barr"
   log 2
 
 try:
   waitFor barr()
-except Exception:
+except ValueError:
   log "exception"
