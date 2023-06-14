@@ -16,7 +16,7 @@ block:
   f.then do(v: int, err: ref Exception):
     log v
 
-  waitForButDontRead(f)
+  discard waitFor(f)
 
 block:
   expectOutput """
@@ -32,4 +32,4 @@ block:
   f.then do(err: ref Exception):
     log "void complete"
 
-  waitForButDontRead(f)
+  waitFor(f)

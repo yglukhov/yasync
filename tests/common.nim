@@ -1,6 +1,9 @@
 import std/[exitprocs, strutils]
 import yasync
+from yasync/compat import waitFor
 from asyncdispatch import nil
+
+export waitFor
 
 var logBuffer = ""
 var expectedOutput = ""
@@ -39,25 +42,3 @@ proc sleep*(ms: int): Future[void] =
   let res = result
   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
     res.complete()
-
-proc waitForButDontRead*(f: FutureBase) =
-  while not f.finished:
-    asyncdispatch.poll()
-
-proc waitForAux[T](f: Future[T]): T =
-  waitForButDontRead(f)
-  f.read()
-
-template waitFor*[T](f: Future[T]): auto =
-  block:
-    type Env = asyncCallEnvType(f)
-    when Env is void:
-      waitForAux(f)
-    else:
-      if false:
-        discard f
-      var e: Env
-      asyncLaunchWithEnv(e, f)
-      while not e.finished:
-        asyncdispatch.poll()
-      e.read()
