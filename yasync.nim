@@ -385,6 +385,16 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
     let iterPtr {.global.}: ProcType = `getIterPtr`(`iterSym`)
     registerAsyncData(`dummySelfCall`, iterPtr, `iterSym`)
 
+    proc dummy() =
+      # Workaround nim bug. Without this proc nim sometimes fails
+      # to instantiate waitFor code. This bug is not demonstrated
+      # in the tests.
+      var e: asyncCallEnvType(`dummySelfCall`)
+      when typeof(read(e)) is void:
+        read(e)
+      else:
+        discard read(e)
+
     var `envSym`: ref `getClosureEnvType`(`iterSym`)
     `envSym`.new()
     GC_ref(`envSym`)
