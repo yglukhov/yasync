@@ -42,3 +42,7 @@ proc sleep*(ms: int): Future[void] =
   let res = result
   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
     res.complete()
+
+proc sleep2*(ms: int) {.async.} =
+  await sleep(ms div 2)
+  await sleep(ms div 2)

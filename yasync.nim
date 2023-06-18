@@ -229,6 +229,9 @@ template realAwait[T](f: Future[T], thisEnv: ptr ContBase, tmpFut: var FutureBas
     yield
   cast[Future[T]](tmpFut).read()
 
+proc getHeader[T](env: var T): ptr ContHeader {.inline, stackTrace: off.} =
+  cast[ptr ContHeader](cast[int](addr env) + offsetof(ContBase, h))
+
 proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
   let hSym = ident("<h>")
   let thisEnv = bindSym"thisEnv"
@@ -239,10 +242,9 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       let subId = ident("sub" & $i)
       stateObj.add newTree(nnkOfBranch, newLit(i), newIdentDefs(subId, data.envType))
       let res = newNimNode(nnkStmtList)
-      let h1Sym = ident("<h>1")
       res.add quote do:
         sub = Substates(sub: uint8(`i`))
-        sub.`subId`.`h1Sym`.e = `thisEnv`(`hSym`)
+        getHeader(sub.`subId`).e = `thisEnv`(`hSym`)
 
       let procPtr = data.procPtr
       let envAccess = newDotExpr(ident"sub", subId)
@@ -258,7 +260,7 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       else:
         # Call async.
         res.add quote do:
-          sub.`subId`.`h1Sym`.p = `procPtr`
+          getHeader(sub.`subId`).p = `procPtr`
 
         # Fill arguments
         for i in 1 ..< n.len:
@@ -269,18 +271,10 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
       result = res
 
   if result.isNil:
-    # Find state corresponding to tmpFut
-    var state = -1
-    for i, n in stateObj:
-      if n.kind == nnkOfBranch and $n[1][0] == "tmpFut":
-        state = i - 1
-    if state < 0:
-      state = stateObj.len - 1
-      stateObj.add newTree(nnkOfBranch, newLit(state), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
-
+    # State corresponding to tmpFut is 0
     let realAwait = bindSym"realAwait"
     result = quote do:
-      sub = Substates(sub: uint8(`state`))
+      sub = Substates(sub: 0)
       `realAwait`(`n`, `thisEnv`(`hSym`), sub.tmpFut)
 
   assert(not result.isNil, "Internal error")
@@ -303,6 +297,7 @@ macro asyncClosure3(c: untyped): untyped =
       break
   assert(stateObjInsertionPoint > 0, "internal error")
   let objStateRecCase = newTree(nnkRecCase, newIdentDefs(ident"sub", ident"uint8"))
+  objStateRecCase.add newTree(nnkOfBranch, newLit(0), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
   c.body = processAsync(c.body, objStateRecCase)
   objStateRecCase.add newTree(nnkElse, newNilLit())
   let insertion = newNimNode(nnkStmtList)
@@ -362,16 +357,14 @@ template getIterPtr(it: typed): ProcType =
       """.}
   )()
 
-template setProc(h: var ContHeader, prc: ProcType) = h.p = prc
+template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
 
 proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
   result = prc
   let getClosureEnvType = bindSym"getClosureEnvType"
   let markAllocatedEnv = bindSym"markAllocatedEnv"
   let launchSym = bindSym"launch"
-  let h1Sym = ident("<h>1")
   let envSym = ident("env")
-  let setProc = bindSym("setProc")
   let retType = prc.params[0] or ident"void"
   prc.params[0] = newTree(nnkBracketExpr, bindSym"Future", retType)
 
@@ -397,7 +390,7 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
-    `setProc`(`envSym`.`h1Sym`, iterPtr)
+    setProc(getHeader(`envSym`[]), iterPtr)
     `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
@@ -446,8 +439,6 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
   let data = asyncData[s]
   let iterPtr = data.procPtr
   let fillArgs = newNimNode(nnkStmtList)
-  let h1Sym = ident("<h>1")
-  let launchSym = bindSym"launch"
   let envAccess = newTree(nnkDotExpr, env, ident"env")
 
   # Fill arguments
@@ -455,9 +446,9 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
     fillArgs.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), call[i])
   result = quote do:
     block:
-      `envAccess`.`h1sym`.p = `iterPtr`
+      getHeader(`envAccess`).p = `iterPtr`
       `fillArgs`
-      `launchSym`(cast[ptr ContBase](addr `envAccess`))
+      launch(cast[ptr ContBase](addr `envAccess`))
 
 macro asyncRaw2(prc: typed): untyped =
   let s = prc.name

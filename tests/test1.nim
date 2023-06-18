@@ -11,7 +11,7 @@ bar
 
 proc foo(a: int) {.async.} =
   log "hi"
-  await sleep(10)
+  await sleep2(10)
   log 1
   await sleep(10)
   await sleep(10)
@@ -24,13 +24,14 @@ proc bar(yo: string) {.async.} =
 
 waitFor bar("hi")
 
+# The following expectations are for 64 bit architectures
 when defined(gcDestructors):
   expectOutput """
-  Bar env size: 144
+  Bar env size: 208
   """
 else:
   expectOutput """
-  Bar env size: 136
+  Bar env size: 200
   """
 
 type BarEnv = asyncCallEnvType bar("hi")
