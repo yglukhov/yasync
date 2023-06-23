@@ -378,29 +378,36 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
     dummySelfCall.add(n)
 
   let getIterPtr = bindSym"getIterPtr"
+  let iterPtr = ident"iterPtr"
+
+  var namedProcRegister = newNimNode(nnkStmtList)
+  if prc.kind in {nnkProcDef, nnkMethodDef}:
+    namedProcRegister = quote do:
+      registerAsyncData(`dummySelfCall`, `iterPtr`, `iterSym`)
+
+      proc dummy() {.used.} =
+        # Workaround nim bug. Without this proc nim sometimes fails
+        # to instantiate waitFor code. This bug is not demonstrated
+        # in the tests.
+        var e: asyncCallEnvType(`dummySelfCall`)
+        when typeof(read(e)) is void:
+          read(e)
+        else:
+          discard read(e)
+
 
   prc.body = quote do:
     asyncClosure2(`iterDecl`)
 
-    let iterPtr {.global.}: ProcType = `getIterPtr`(`iterSym`)
-    registerAsyncData(`dummySelfCall`, iterPtr, `iterSym`)
-
-    proc dummy() =
-      # Workaround nim bug. Without this proc nim sometimes fails
-      # to instantiate waitFor code. This bug is not demonstrated
-      # in the tests.
-      var e: asyncCallEnvType(`dummySelfCall`)
-      when typeof(read(e)) is void:
-        read(e)
-      else:
-        discard read(e)
+    let `iterPtr` {.global.}: ProcType = `getIterPtr`(`iterSym`)
+    `namedProcRegister`
 
     var `envSym`: ref `getClosureEnvType`(`iterSym`)
     `envSym`.new()
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
-    setProc(getHeader(`envSym`[]), iterPtr)
+    setProc(getHeader(`envSym`[]), `iterPtr`)
     `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
@@ -417,7 +424,9 @@ proc fixupLastReturnStmt(body: NimNode): NimNode =
 
 proc asyncProc(prc: NimNode): NimNode =
   let prcName = prc.name
-  let iterSym = genSym(nskIterator, $prcName & ":iter")
+  let name = if prcName.kind == nnkEmpty: ":anonymous" else: $prcName
+
+  let iterSym = genSym(nskIterator, name & ":iter")
 
   var resultType = prc.params[0] or ident"void"
 
@@ -473,8 +482,11 @@ macro asyncRaw*(prc: untyped): untyped =
 
 macro async*(prc: untyped): untyped =
   case prc.kind
-  of nnkProcDef, nnkMethodDef: asyncProc(prc)
-  else: nil
+  of nnkProcDef, nnkMethodDef, nnkDo: asyncProc(prc)
+  else:
+    echo treeRepr(prc)
+    assert(false)
+    nil
 
 template await*[T](f: ref Cont[T]): T =
   if false:
