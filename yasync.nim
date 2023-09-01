@@ -422,11 +422,6 @@ proc fixupLastReturnStmt(body: NimNode): NimNode =
     body[^1] = newCall(bindSym"assignResult", body[^1])
   result = body
 
-proc dummy(h: ContHeader) {.inline.} =
-  # This proc is used to make nim place <h> at the beginning of iter env.
-  # It was not needed until https://github.com/nim-lang/Nim/pull/22559
-  discard
-
 proc asyncProc(prc: NimNode): NimNode =
   let prcName = prc.name
   let name = if prcName.kind == nnkEmpty: ":anonymous" else: $prcName
@@ -446,7 +441,6 @@ proc asyncProc(prc: NimNode): NimNode =
   let iterDecl = quote do:
     iterator `iterSym`() {.closure.} =
       var `hSym` {.noinit.}: ContHeader
-      dummy(`hSym`)
       when `resultType` isnot void:
         {.push warning[ResultShadowed]: off.}
         var `resultSym`: `resultType`
