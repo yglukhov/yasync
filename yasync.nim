@@ -306,7 +306,7 @@ macro asyncClosure3(c: untyped): untyped =
     let subIdent = ident"sub"
     insertion.add newTree(nnkTypeSection, newTree(nnkTypeDef, ident"Substates", newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))))
     insertion.add quote do:
-      var `subIdent`: Substates
+      var `subIdent` {.used.}: Substates
   c.body[stateObjInsertionPoint] = insertion
   # echo repr objStateRecCase
   # echo "CLOS2: ", repr result
