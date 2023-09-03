@@ -188,10 +188,19 @@ iterator arguments(formalParams: NimNode): tuple[idx: int, name, typ, default: N
       yield (iParam, pp[j], copyNimTree(stripSinkFromArgType(pp[^2])), pp[^1])
       inc iParam
 
+proc keepFromReordering[T](v: T) {.inline.} =
+  # This proc is used to make nim place iterator variables in its environment
+  # in the same order they are defined in the iterator.
+  # It was not needed until https://github.com/nim-lang/Nim/pull/22559
+  discard
+
 proc processArguments(prc: NimNode): NimNode =
-  result = newNimNode(nnkVarSection)
+  let varSection = newNimNode(nnkVarSection)
+  result = newNimNode(nnkStmtList)
+  result.add(varSection)
   for i, n, t, d in arguments(prc.params):
-    result.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
+    varSection.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
+    result.add(newCall(bindSym"keepFromReordering", n))
 
 proc transformReturnStmt(n, resSym: NimNode): NimNode =
   result = n
@@ -441,9 +450,11 @@ proc asyncProc(prc: NimNode): NimNode =
   let iterDecl = quote do:
     iterator `iterSym`() {.closure.} =
       var `hSym` {.noinit.}: ContHeader
+      keepFromReordering(`hSym`)
       when `resultType` isnot void:
         {.push warning[ResultShadowed]: off.}
         var `resultSym`: `resultType`
+        keepFromReordering(`resultSym`)
         {.pop.}
       `argDefs`
       ##<STATE OBJ INSERTION POINT>
