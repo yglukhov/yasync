@@ -41,6 +41,9 @@ proc markAllocatedEnv(e: ptr ContBase) {.inline.} =
 proc isAllocatedEnv(e: ptr ContBase): bool {.inline.} =
   e.h.flags.contains(fAllocated)
 
+template setStateFinished[T](a: T) =
+  a.`<state_reserved>` = -1
+
 proc resume(p: ptr ContBase) =
   {.push warning[BareExcept]: off.}
   var p = p
@@ -61,7 +64,7 @@ proc resume(p: ptr ContBase) =
       except Exception as e:
         # Closure iterators throwing exceptions do not necessarily have finished state
         # so fix it here
-        p.`<state_reserved>` = -1
+        p.setStateFinished()
         p.h.error = e
       if not p.finished:
         break
@@ -75,12 +78,12 @@ proc launchf(p: ptr ContBase): bool {.inline.} =
   not finished(p)
 
 proc complete*[T](resFut: ptr Cont[T], v: T) =
-  resFut.`<state_reserved>` = -1
+  resFut.setStateFinished()
   resFut.result = v
   resume(resFut)
 
 proc complete*(resFut: ptr Cont[void]) =
-  resFut.`<state_reserved>` = -1
+  resFut.setStateFinished()
   resume(resFut)
 
 proc complete*[T](resFut: Future[T], v: T) {.inline.} =
@@ -90,7 +93,7 @@ proc complete*(resFut: Future[void]) {.inline.} =
   complete(cast[ptr Cont[void]](resFut))
 
 proc fail(resFut: ptr ContBase, err: ref Exception) =
-  resFut.`<state_reserved>` = -1
+  resFut.setStateFinished()
   resFut.h.error = err
   resume(resFut)
 
@@ -110,22 +113,25 @@ proc onComplete[T](p: pointer) {.nimcall, gcsafe.} =
   # let p = cast[ptr ContBase](p)
   when T is void:
     let p = cast[CBVoid](p)
+    p.setStateFinished()
     p.cb(p.f.h.error)
   else:
     let p = cast[CB[T]](p)
+    p.setStateFinished()
     p.cb(p.f.result, p.f.h.error)
-  GC_unref(p)
 
 proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception) {.gcsafe.}) =
   assert(f.h.e.isNil, "Future already has a callback")
-  var c = CB[T](f: f, cb: cb)
+  let c = CB[T](f: f, cb: cb)
+  c.h.flags.incl fAllocated
   GC_ref(c)
   c.h.p = onComplete[T]
   f.h.e = cast[ptr ContBase](c)
 
 proc then*(f: Future[void], cb: proc(error: ref Exception) {.gcsafe.}) =
   assert(f.h.e.isNil, "Future already has a callback")
-  var c = CBVoid(f: f, cb: cb)
+  let c = CBVoid(f: f, cb: cb)
+  c.h.flags.incl fAllocated
   GC_ref(c)
   c.h.p = onComplete[void]
   f.h.e = cast[ptr ContBase](c)
