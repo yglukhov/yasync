@@ -5,10 +5,10 @@ from asyncdispatch import nil
 
 export waitFor
 
-var logBuffer = ""
-var expectedOutput = ""
+var logBuffer {.threadvar.}: string
+var expectedOutput {.threadvar.}: string
 
-proc log*(v: varargs[string, `$`]) =
+proc log*(v: varargs[string, `$`]) {.gcsafe.} =
   for a in v:
     logBuffer &= a
   logBuffer &= '\n'

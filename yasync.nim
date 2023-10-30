@@ -48,7 +48,8 @@ proc resume(p: ptr ContBase) =
     if p.finished:
       let p1 = p.h.e
       if isAllocatedEnv(p):
-        GC_unref(cast[ref ContBase](p))
+        let pp = cast[ref ContBase](p)
+        GC_unref(pp)
 
       p = p1
     else:
@@ -98,14 +99,15 @@ proc fail*(resFut: ref ContBase, err: ref Exception) {.inline.} =
 
 type
   CB[T] = ref object of ContBase
-    cb: proc(v: T, error: ref Exception)
+    cb: proc(v: T, error: ref Exception) {.gcsafe.}
     f: Future[T]
 
   CBVoid = ref object of ContBase
-    cb: proc(error: ref Exception)
+    cb: proc(error: ref Exception) {.gcsafe.}
     f: Future[void]
 
-proc onComplete[T](p: ptr ContBase) =
+proc onComplete[T](p: pointer) {.nimcall, gcsafe.} =
+  # let p = cast[ptr ContBase](p)
   when T is void:
     let p = cast[CBVoid](p)
     p.cb(p.f.h.error)
@@ -114,18 +116,18 @@ proc onComplete[T](p: ptr ContBase) =
     p.cb(p.f.result, p.f.h.error)
   GC_unref(p)
 
-proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception)) =
+proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception) {.gcsafe.}) =
   assert(f.h.e.isNil, "Future already has a callback")
   var c = CB[T](f: f, cb: cb)
   GC_ref(c)
-  c.h.p = cast[ProcType](onComplete[T])
+  c.h.p = onComplete[T]
   f.h.e = cast[ptr ContBase](c)
 
-proc then*(f: Future[void], cb: proc(error: ref Exception)) =
+proc then*(f: Future[void], cb: proc(error: ref Exception) {.gcsafe.}) =
   assert(f.h.e.isNil, "Future already has a callback")
   var c = CBVoid(f: f, cb: cb)
   GC_ref(c)
-  c.h.p = cast[ProcType](onComplete[void])
+  c.h.p = onComplete[void]
   f.h.e = cast[ptr ContBase](c)
 
 proc checkFinished(resFut: ptr ContBase) {.stackTrace: off.} =
