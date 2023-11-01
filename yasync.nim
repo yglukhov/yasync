@@ -100,6 +100,8 @@ proc fail(resFut: ptr ContBase, err: ref Exception) =
 proc fail*(resFut: ref ContBase, err: ref Exception) {.inline.} =
   fail(cast[ptr ContBase](resFut), err)
 
+proc error*(f: ref ContBase): ref Exception {.inline.} = f.h.error
+
 type
   CB[T] = ref object of ContBase
     cb: proc(v: T, error: ref Exception) {.gcsafe.}
@@ -122,19 +124,25 @@ proc onComplete[T](p: pointer) {.nimcall, gcsafe.} =
 
 proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception) {.gcsafe.}) =
   assert(f.h.e.isNil, "Future already has a callback")
-  let c = CB[T](f: f, cb: cb)
-  c.h.flags.incl fAllocated
-  GC_ref(c)
-  c.h.p = onComplete[T]
-  f.h.e = cast[ptr ContBase](c)
+  if f.finished:
+    cb(f.result, f.h.error)
+  else:
+    let c = CB[T](f: f, cb: cb)
+    c.h.flags.incl fAllocated
+    GC_ref(c)
+    c.h.p = onComplete[T]
+    f.h.e = cast[ptr ContBase](c)
 
 proc then*(f: Future[void], cb: proc(error: ref Exception) {.gcsafe.}) =
   assert(f.h.e.isNil, "Future already has a callback")
-  let c = CBVoid(f: f, cb: cb)
-  c.h.flags.incl fAllocated
-  GC_ref(c)
-  c.h.p = onComplete[void]
-  f.h.e = cast[ptr ContBase](c)
+  if f.finished:
+    cb(f.h.error)
+  else:
+    let c = CBVoid(f: f, cb: cb)
+    c.h.flags.incl fAllocated
+    GC_ref(c)
+    c.h.p = onComplete[void]
+    f.h.e = cast[ptr ContBase](c)
 
 proc checkFinished(resFut: ptr ContBase) {.stackTrace: off.} =
   assert(resFut.finished)
