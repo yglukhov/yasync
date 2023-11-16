@@ -33,3 +33,25 @@ block:
     log "void complete"
 
   waitFor(f)
+
+block:
+  expectOutput """
+  hi
+  8
+  7
+  6
+  5
+  123
+  """
+  proc test() =
+    var a = "hi"
+    var s = @[8, 7, 6]
+    proc foo(b: int): int {.asyncClosureExperimental.} =
+      log a
+      await sleep(10)
+      for i in s:
+        log i
+      log b
+      123
+    log waitFor foo(5)
+  test()

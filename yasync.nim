@@ -257,10 +257,10 @@ template realAwait[T](f: Future[T], thisEnv: ptr ContBase, tmpFut: var FutureBas
 proc getHeader[T](env: var T): ptr ContHeader {.inline, stackTrace: off.} =
   cast[ptr ContHeader](cast[int](addr env) + offsetof(ContBase, h))
 
-proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
+proc replaceDummyAwait(n, stateObj: NimNode, isCapture: bool): NimNode =
   let hSym = ident("<h>")
   let thisEnv = bindSym"thisEnv"
-  if n.kind == nnkCall and n[0].kind == nnkSym:
+  if n.kind == nnkCall and n[0].kind == nnkSym and not isCapture:
     let data = asyncData.getOrDefault(n[0])
     if data.envType != nil:
       let i = stateObj.len - 1
@@ -298,21 +298,27 @@ proc replaceDummyAwait(n, stateObj: NimNode): NimNode =
   if result.isNil:
     # State corresponding to tmpFut is 0
     let realAwait = bindSym"realAwait"
-    result = quote do:
-      sub = Substates(sub: 0)
-      `realAwait`(`n`, `thisEnv`(`hSym`), sub.tmpFut)
+    let tmpFutId = ident"tmpFut"
+    result =
+      if isCapture:
+        quote do:
+          `realAwait`(`n`, `thisEnv`(`hSym`), `tmpFutId`)
+      else:
+        quote do:
+          sub = Substates(sub: 0)
+          `realAwait`(`n`, `thisEnv`(`hSym`), sub.tmpFut)
 
   assert(not result.isNil, "Internal error")
 
-proc processAsync(n, stateObj: NimNode): NimNode =
+proc processAsync(n, stateObj: NimNode, isCapture: bool): NimNode =
   result = n
   for i in 0 ..< result.len:
-    result[i] = processAsync(result[i], stateObj)
+    result[i] = processAsync(result[i], stateObj, isCapture)
 
   if n.kind == nnkCall and n[0].kind == nnkSym and $n[0] == "dummyAwaitMarkerMagic":
-    result = replaceDummyAwait(n[1], stateObj)
+    result = replaceDummyAwait(n[1], stateObj, isCapture)
 
-macro asyncClosure3(c: untyped): untyped =
+macro asyncClosure3(c: untyped, isCapture: static[bool]): untyped =
   result = c
   # echo "CLOS3: ", treerepr result
   var stateObjInsertionPoint = -1
@@ -323,10 +329,10 @@ macro asyncClosure3(c: untyped): untyped =
   assert(stateObjInsertionPoint > 0, "internal error")
   let objStateRecCase = newTree(nnkRecCase, newIdentDefs(ident"sub", ident"uint8"))
   objStateRecCase.add newTree(nnkOfBranch, newLit(0), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
-  c.body = processAsync(c.body, objStateRecCase)
+  c.body = processAsync(c.body, objStateRecCase, isCapture)
   objStateRecCase.add newTree(nnkElse, newNilLit())
   let insertion = newNimNode(nnkStmtList)
-  if objStateRecCase.len > 2:
+  if objStateRecCase.len > 2 and not isCapture:
     # The reccase is not empty meaning there are substates
     let subIdent = ident"sub"
     insertion.add newTree(nnkTypeSection, newTree(nnkTypeDef, ident"Substates", newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))))
@@ -336,8 +342,8 @@ macro asyncClosure3(c: untyped): untyped =
   # echo repr objStateRecCase
   # echo "CLOS2: ", repr result
 
-macro asyncClosure2(c: typed): untyped =
-  newCall(bindSym"asyncClosure3", c)
+macro asyncClosure2(c: typed, isCapture: bool): untyped =
+  newCall(bindSym"asyncClosure3", c, isCapture)
 
 proc closureEnvType(a: NimNode): NimNode =
   let im = getImplTransformed(a)
@@ -384,7 +390,7 @@ template getIterPtr(it: typed): ProcType =
 
 template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
 
-proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
+proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode =
   result = prc
   let getClosureEnvType = bindSym"getClosureEnvType"
   let markAllocatedEnv = bindSym"markAllocatedEnv"
@@ -406,7 +412,7 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
   let iterPtr = ident"iterPtr"
 
   var namedProcRegister = newNimNode(nnkStmtList)
-  if prc.kind in {nnkProcDef, nnkMethodDef}:
+  if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
     namedProcRegister = quote do:
       registerAsyncData(`dummySelfCall`, `iterPtr`, `iterSym`)
 
@@ -422,18 +428,23 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode): NimNode =
 
 
   prc.body = quote do:
-    asyncClosure2(`iterDecl`)
+    asyncClosure2(`iterDecl`, `isCapture`)
 
     let `iterPtr` {.global.}: ProcType = `getIterPtr`(`iterSym`)
     `namedProcRegister`
 
-    var `envSym`: ref `getClosureEnvType`(`iterSym`)
-    `envSym`.new()
+    var it = `iterSym`
+    when `isCapture`:
+      let `envSym` = cast[ref ContBase](rawEnv(it))
+    else:
+      let `envSym` = cast[ref `getClosureEnvType`(`iterSym`)](rawEnv(it))
+
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
     setProc(getHeader(`envSym`[]), `iterPtr`)
-    `fillArgs`
+    when not `isCapture`:
+      `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
 
 template assignResult[T](v: T) =
@@ -447,7 +458,7 @@ proc fixupLastReturnStmt(body: NimNode): NimNode =
     body[^1] = newCall(bindSym"assignResult", body[^1])
   result = body
 
-proc asyncProc(prc: NimNode): NimNode =
+proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
   let prcName = prc.name
   let name = if prcName.kind == nnkEmpty: ":anonymous" else: $prcName
 
@@ -463,6 +474,8 @@ proc asyncProc(prc: NimNode): NimNode =
   let body1 = fixupLastReturnStmt(prc.body)
   let body = transformReturnStmt(body1, resultSym)
 
+  let tmpFutId = ident"tmpFut"
+
   let iterDecl = quote do:
     iterator `iterSym`() {.closure.} =
       var `hSym` {.noinit.}: ContHeader
@@ -472,11 +485,15 @@ proc asyncProc(prc: NimNode): NimNode =
         var `resultSym`: `resultType`
         keepFromReordering(`resultSym`)
         {.pop.}
-      `argDefs`
+      when not `isCapture`:
+        `argDefs`
       ##<STATE OBJ INSERTION POINT>
+      when `isCapture`:
+        var `tmpFutId`: FutureBase
+
       `body`
 
-  result = makeAsyncWrapper(prc, iterSym, iterDecl)
+  result = makeAsyncWrapper(prc, iterSym, iterDecl, isCapture)
 
 macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
   call.expectKind(nnkCall)
@@ -509,11 +526,20 @@ macro asyncRaw*(prc: untyped): untyped =
 
 macro async*(prc: untyped): untyped =
   case prc.kind
-  of nnkProcDef, nnkMethodDef, nnkDo: asyncProc(prc)
+  of nnkProcDef, nnkMethodDef, nnkDo: asyncProc(prc, false)
   else:
     echo treeRepr(prc)
     assert(false)
     nil
+
+macro asyncClosureExperimental*(prc: untyped): untyped =
+  case prc.kind
+  of nnkProcDef, nnkMethodDef, nnkDo: asyncProc(prc, true)
+  else:
+    echo treeRepr(prc)
+    assert(false)
+    nil
+
 
 template await*[T](f: ref Cont[T]): T =
   if false:
