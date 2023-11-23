@@ -2,10 +2,10 @@
 
 version       = "0.1.0"
 author        = "Yuriy Glukhov"
-description   = "A new awesome nimble package"
+description   = "Yet another async/await for Nim"
 license       = "MIT"
 
 
 # Dependencies
 
-requires "nim >= 1.4.2"
+requires "nim >= 2.0"
