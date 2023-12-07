@@ -285,8 +285,9 @@ proc replaceDummyAwait(n, stateObj: NimNode, isCapture: bool): NimNode =
       else:
         # Call async.
         res.add quote do:
-          proc getIterPtr(): ProcType {.nimcall, importc: `procPtrName`.}
-          getHeader(sub.`subId`).p = getIterPtr()
+          block:
+            proc getIterPtr(): ProcType {.nimcall, importc: `procPtrName`.}
+            getHeader(sub.`subId`).p = getIterPtr()
 
         # Fill arguments
         for i in 1 ..< n.len:
@@ -534,8 +535,9 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
     fillArgs.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), call[i])
   result = quote do:
     block:
-      proc getIterPtr(): ProcType {.nimcall, importc: `iterPtrName`.}
-      getHeader(`envAccess`).p = getIterPtr()
+      block:
+        proc getIterPtr(): ProcType {.nimcall, importc: `iterPtrName`.}
+        getHeader(`envAccess`).p = getIterPtr()
       `fillArgs`
       launch(cast[ptr ContBase](addr `envAccess`))
 
