@@ -8,8 +8,8 @@ type
   ContHeader = object
     p: ProcType
     e: ptr ContBase
-    flags: set[ContFlags]
     error: ref Exception
+    flags: set[ContFlags]
 
   ContBase = object of RootObj
     `<state_reserved>`: int
@@ -405,8 +405,8 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode
       const iterPtrName = genIterPtrName(`iterPtrName`)
       proc getIterPtr(): ProcType {.stacktrace: off, nimcall, exportc: iterPtrName.} =
         # The emit is a hacky optimization to avoid calling newObj
-        # this code is performed once per every async function
-        # so should not bee critical.
+        # and eventually allow the C optimizer to collapse it
+        # entirely.
         when defined(gcDestructors):
           {.emit: """
           struct {
