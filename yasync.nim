@@ -184,7 +184,7 @@ template thisEnv(a: var ContHeader): ptr ContBase =
 
 type
   AsyncProcData = object
-    procPtr: NimNode # Symbol of proc ptr
+    procPtrName: string # C Symbol of proc ptr
     envType: NimNode
 
 proc hash(n: NimNode): Hash = hash($n)
@@ -271,9 +271,9 @@ proc replaceDummyAwait(n, stateObj: NimNode, isCapture: bool): NimNode =
         sub = Substates(sub: uint8(`i`))
         getHeader(sub.`subId`).e = `thisEnv`(`hSym`)
 
-      let procPtr = data.procPtr
+      let procPtrName = data.procPtrName
       let envAccess = newDotExpr(ident"sub", subId)
-      if procPtr.isNil:
+      if procPtrName == "":
         # Call raw
         # Replace last parameter with addr env
         n[^1] = newCall("addr", envAccess)
@@ -285,7 +285,8 @@ proc replaceDummyAwait(n, stateObj: NimNode, isCapture: bool): NimNode =
       else:
         # Call async.
         res.add quote do:
-          getHeader(sub.`subId`).p = `procPtr`
+          proc getIterPtr(): ProcType {.nimcall, importc: `procPtrName`.}
+          getHeader(sub.`subId`).p = getIterPtr()
 
         # Fill arguments
         for i in 1 ..< n.len:
@@ -353,8 +354,8 @@ proc closureEnvType(a: NimNode): NimNode =
 macro getClosureEnvType(a: typed): untyped =
   result = closureEnvType(a)
 
-macro registerAsyncData(dummyCall: typed, procPtr: typed, iterSym: typed): untyped =
-  asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), procPtr: procPtr)
+macro registerAsyncData(dummyCall: typed, procPtrName: static[string], iterSym: typed): untyped =
+  asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), procPtrName: procPtrName)
 
 macro asyncCallEnvType*(call: Future): untyped =
   ## Returns type of async environment for the `call`
@@ -366,29 +367,12 @@ macro asyncCallEnvType*(call: Future): untyped =
       return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
   return ident"void"
 
-template getIterPtr(it: typed): ProcType =
-  (proc(): ProcType {.nimcall, inline.} =
-    # The emit is a hacky optimization to avoid calling newObj
-    # this code is performed once per every async function
-    # so should not bee critical. Unfortunately it doesn't work
-    # with orc, as there's no way to prevent destructor call.
-    when not defined(gcDestructors):
-      {.emit: """
-      struct {
-        struct {
-          TNimType* m_type;
-        } Sup;
-      } dummy;
-      #define newObj(a, b) ((void*)&dummy)
-      """.}
-    result = cast[ProcType](rawProc(it))
-    when not defined(gcDestructors):
-      {.emit: """
-      #undef newObj
-      """.}
-  )()
-
 template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
+
+var counter {.compileTime.} = 0
+proc genIterPtrName(s: string): string {.compileTime.} =
+  inc counter
+  s & "_" & $counter
 
 proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode =
   result = prc
@@ -408,13 +392,55 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode
     fillArgs.add newCall(bindSym"fillArgPtr", envSym, newLit(i), n)
     dummySelfCall.add(n)
 
-  let getIterPtr = bindSym"getIterPtr"
-  let iterPtr = ident"iterPtr"
+  let prcName = case prc.name.kind
+                of nnkSym, nnkIdent: $prc.name
+                of nnkEmpty: "anonymous"
+                else: "unknown"
+  let iterPtrName = "yasync_getIterPtr_" & prcName
 
   var namedProcRegister = newNimNode(nnkStmtList)
   if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
     namedProcRegister = quote do:
-      registerAsyncData(`dummySelfCall`, `iterPtr`, `iterSym`)
+      const iterPtrName = genIterPtrName(`iterPtrName`)
+      proc getIterPtr(): ProcType {.stacktrace: off, nimcall, exportc: iterPtrName.} =
+        # The emit is a hacky optimization to avoid calling newObj
+        # this code is performed once per every async function
+        # so should not bee critical.
+        when defined(gcDestructors):
+          {.emit: """
+          struct {
+            RootObj Sup;
+          } dummy;
+          #define nimNewObj(a, b) ((void*)&dummy)
+          #define nimCopyMem(a, b, c)
+          """.}
+        else:
+          {.emit: """
+          struct {
+            struct {
+              TNimType* m_type;
+            } Sup;
+          } dummy;
+          #define newObj(a, b) ((void*)&dummy)
+          """.}
+
+        result = cast[ProcType](rawProc(`iterSym`))
+        when defined(gcDestructors):
+          {.emit: """
+
+          #undef nimNewObj
+          #undef nimCopyMem
+          colontmpD_ = NIM_NIL;
+          """.}
+        else:
+          {.emit: """
+          #undef newObj
+          """.}
+
+      if false:
+        discard getIterPtr()
+
+      registerAsyncData(`dummySelfCall`, iterPtrName, `iterSym`)
 
       proc dummy() {.used.} =
         # Workaround nim bug. Without this proc nim sometimes fails
@@ -430,7 +456,6 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode
   prc.body = quote do:
     asyncClosure2(`iterDecl`, `isCapture`)
 
-    let `iterPtr` {.global.}: ProcType = `getIterPtr`(`iterSym`)
     `namedProcRegister`
 
     var it = `iterSym`
@@ -442,7 +467,7 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode
     GC_ref(`envSym`)
     `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
-    setProc(getHeader(`envSym`[]), `iterPtr`)
+    setProc(getHeader(`envSym`[]), cast[ProcType](rawProc(it)))
     when not `isCapture`:
       `fillArgs`
     `launchSym`(cast[ptr ContBase](`envSym`))
@@ -500,7 +525,7 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
   let s = call[0]
   s.expectKind(nnkSym)
   let data = asyncData[s]
-  let iterPtr = data.procPtr
+  let iterPtrName = data.procPtrName
   let fillArgs = newNimNode(nnkStmtList)
   let envAccess = newTree(nnkDotExpr, env, ident"env")
 
@@ -509,7 +534,8 @@ macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
     fillArgs.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), call[i])
   result = quote do:
     block:
-      getHeader(`envAccess`).p = `iterPtr`
+      proc getIterPtr(): ProcType {.nimcall, importc: `iterPtrName`.}
+      getHeader(`envAccess`).p = getIterPtr()
       `fillArgs`
       launch(cast[ptr ContBase](addr `envAccess`))
 
