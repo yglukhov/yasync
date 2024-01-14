@@ -52,3 +52,25 @@ proc recursive1(a: int) {.async.} =
     await recursive1(a - 1)
 
 waitFor recursive1(5)
+
+# Using return value
+expectOutput """
+baz: 5
+10
+baz: 10
+A: 15
+baz: 5
+baz: 10
+B: 25
+"""
+proc baz(a: int): int {.async.} =
+  await sleep(5)
+  log "baz: ", a
+  a + 5
+
+proc baz2() {.async.} =
+  log await baz(5)
+  log "A: ", await baz(10)
+  log "B: ", (await baz(5)) + (await baz(10))
+
+waitFor baz2()

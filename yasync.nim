@@ -1,4 +1,4 @@
-import macros, tables, hashes
+import std/[macros, tables, hashes, strutils]
 
 type
   ProcType = proc(e: pointer) {.gcsafe, nimcall.}
@@ -173,12 +173,6 @@ proc read*(resFut: AsyncEnv): auto =
   checkFinished(cast[ptr ContBase](addr resFut))
   readAux(resFut.env)
 
-template contSubstate(s: untyped): untyped =
-  if launchf(cast[ptr ContBase](addr s)):
-    yield
-  checkFinished(cast[ptr ContBase](addr s))
-  readAux(s)
-
 template thisEnv(a: var ContHeader): ptr ContBase =
   cast[ptr ContBase](cast[int](addr(a)) - sizeof(int) * 2)
 
@@ -204,19 +198,29 @@ iterator arguments(formalParams: NimNode): tuple[idx: int, name, typ, default: N
       yield (iParam, pp[j], copyNimTree(stripSinkFromArgType(pp[^2])), pp[^1])
       inc iParam
 
-proc keepFromReordering[T](v: T) {.inline.} =
+template keepFromReordering[T](v: T) =
   # This proc is used to make nim place iterator variables in its environment
   # in the same order they are defined in the iterator.
   # It was not needed until https://github.com/nim-lang/Nim/pull/22559
-  discard
+  discard v
 
-proc processArguments(prc: NimNode): NimNode =
+proc sameIdent(a: NimNode, s: string): bool =
+  cmpIgnoreStyle($a, s) == 0
+
+proc isGenericArgType(t: NimNode): bool =
+  if t.kind == nnkIdent and sameIdent(t, "typedesc"):
+    return true
+  elif t.kind == nnkBracketExpr and t[0].kind == nnkSym and sameIdent(t[0], "typedesc"):
+    return true
+
+proc makeArgDefs(prc: NimNode): NimNode =
   let varSection = newNimNode(nnkVarSection)
   result = newNimNode(nnkStmtList)
   result.add(varSection)
   for i, n, t, d in arguments(prc.params):
-    varSection.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
-    result.add(newCall(bindSym"keepFromReordering", n))
+    if not isGenericArgType(t):
+      varSection.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
+      result.add(newCall(bindSym"keepFromReordering", n))
 
 proc transformReturnStmt(n, resSym: NimNode): NimNode =
   result = n
@@ -245,107 +249,10 @@ template fillArg[TEnv, TArg](e: var TEnv, idx: int, arg: TArg) =
 template fillArgPtr[TEnv, TArg](e: ref TEnv, idx: int, arg: TArg) =
   argFieldAccess(e[], idx) = arg
 
-proc dummyAwaitMarkerMagic[T](f: Future[T]): T = discard
-
-template realAwait[T](f: Future[T], thisEnv: ptr ContBase, tmpFut: var FutureBase): auto =
-  tmpFut = f
-  if not tmpFut.finished:
-    tmpFut.h.e = thisEnv
-    yield
-  cast[Future[T]](tmpFut).read()
+proc dummyAwaitMarkerMagic[T](f: Future[T]): T {.importc: "yasync_report_error_if_this_symbol_is_missing_on_linkage".}
 
 proc getHeader[T](env: var T): ptr ContHeader {.inline, stackTrace: off.} =
   cast[ptr ContHeader](cast[int](addr env) + offsetof(ContBase, h))
-
-proc replaceDummyAwait(n, stateObj: NimNode, isCapture: bool): NimNode =
-  let hSym = ident("<h>")
-  let thisEnv = bindSym"thisEnv"
-  if n.kind == nnkCall and n[0].kind == nnkSym and not isCapture:
-    let data = asyncData.getOrDefault(n[0])
-    if data.envType != nil:
-      let i = stateObj.len - 1
-      let subId = ident("sub" & $i)
-      stateObj.add newTree(nnkOfBranch, newLit(i), newIdentDefs(subId, data.envType))
-      let res = newNimNode(nnkStmtList)
-      res.add quote do:
-        sub = Substates(sub: uint8(`i`))
-        getHeader(sub.`subId`).e = `thisEnv`(`hSym`)
-
-      let procPtrName = data.procPtrName
-      let envAccess = newDotExpr(ident"sub", subId)
-      if procPtrName == "":
-        # Call raw
-        # Replace last parameter with addr env
-        n[^1] = newCall("addr", envAccess)
-        result = newTree(nnkStmtList,
-                              n,
-                              newTree(nnkYieldStmt, newEmptyNode()),
-                              newCall(bindSym"read", envAccess))
-        res.add(result)
-      else:
-        # Call async.
-        res.add quote do:
-          block:
-            proc getIterPtr(): ProcType {.nimcall, importc: `procPtrName`.}
-            getHeader(sub.`subId`).p = getIterPtr()
-
-        # Fill arguments
-        for i in 1 ..< n.len:
-          res.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), n[i])
-
-        res.add newCall(bindSym"contSubstate", envAccess)
-
-      result = res
-
-  if result.isNil:
-    # State corresponding to tmpFut is 0
-    let realAwait = bindSym"realAwait"
-    let tmpFutId = ident"tmpFut"
-    result =
-      if isCapture:
-        quote do:
-          `realAwait`(`n`, `thisEnv`(`hSym`), `tmpFutId`)
-      else:
-        quote do:
-          sub = Substates(sub: 0)
-          `realAwait`(`n`, `thisEnv`(`hSym`), sub.tmpFut)
-
-  assert(not result.isNil, "Internal error")
-
-proc processAsync(n, stateObj: NimNode, isCapture: bool): NimNode =
-  result = n
-  for i in 0 ..< result.len:
-    result[i] = processAsync(result[i], stateObj, isCapture)
-
-  if n.kind == nnkCall and n[0].kind == nnkSym and $n[0] == "dummyAwaitMarkerMagic":
-    result = replaceDummyAwait(n[1], stateObj, isCapture)
-
-macro asyncClosure3(c: untyped, isCapture: static[bool]): untyped =
-  result = c
-  # echo "CLOS3: ", treerepr result
-  var stateObjInsertionPoint = -1
-  for i, n in c.body:
-    if n.kind == nnkCommentStmt and $n == "<STATE OBJ INSERTION POINT>":
-      stateObjInsertionPoint = i
-      break
-  assert(stateObjInsertionPoint > 0, "internal error")
-  let objStateRecCase = newTree(nnkRecCase, newIdentDefs(ident"sub", ident"uint8"))
-  objStateRecCase.add newTree(nnkOfBranch, newLit(0), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
-  c.body = processAsync(c.body, objStateRecCase, isCapture)
-  objStateRecCase.add newTree(nnkElse, newNilLit())
-  let insertion = newNimNode(nnkStmtList)
-  if objStateRecCase.len > 2 and not isCapture:
-    # The reccase is not empty meaning there are substates
-    let subIdent = ident"sub"
-    insertion.add newTree(nnkTypeSection, newTree(nnkTypeDef, ident"Substates", newEmptyNode(), newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))))
-    insertion.add quote do:
-      var `subIdent` {.used.}: Substates
-  c.body[stateObjInsertionPoint] = insertion
-  # echo repr objStateRecCase
-  # echo "CLOS2: ", repr result
-
-macro asyncClosure2(c: typed, isCapture: bool): untyped =
-  newCall(bindSym"asyncClosure3", c, isCapture)
 
 proc closureEnvType(a: NimNode): NimNode =
   let im = getImplTransformed(a)
@@ -368,6 +275,12 @@ macro asyncCallEnvType*(call: Future): untyped =
       return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
   return ident"void"
 
+macro asyncCallProcPtrName(call: Future): untyped =
+  call.expectKind(nnkCall)
+  let d = asyncData.getOrDefault(call[0])
+  doAssert(d.envType != nil, "yasync internal error")
+  newLit(d.procPtrName)
+
 template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
 
 var counter {.compileTime.} = 0
@@ -375,22 +288,20 @@ proc genIterPtrName(s: string): string {.compileTime.} =
   inc counter
   s & "_" & $counter
 
-proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode =
-  result = prc
-  let getClosureEnvType = bindSym"getClosureEnvType"
-  let markAllocatedEnv = bindSym"markAllocatedEnv"
-  let launchSym = bindSym"launch"
-  let envSym = ident("env")
-  let retType = prc.params[0] or ident"void"
-  prc.params[0] = newTree(nnkBracketExpr, bindSym"Future", retType)
-
-  let fillArgs = newNimNode(nnkStmtList)
-
+proc makeAsyncProcRegistration(prc, iterSym: NimNode, isCapture: bool): NimNode =
   let dummySelfCall = newCall(prc.name)
+
+  let genericParams = prc[2]
+  genericParams.expectKind({nnkEmpty, nnkGenericParams})
+  if genericParams.kind == nnkGenericParams:
+    let genericCall = newTree(nnkBracketExpr, dummySelfCall[0])
+    for p in genericParams:
+      for i in 0 ..< p.len - 2:
+        genericCall.add(p[i])
+    dummySelfCall[0] = genericCall
 
   # Fill arguments
   for i, n, t, d in arguments(prc.params):
-    fillArgs.add newCall(bindSym"fillArgPtr", envSym, newLit(i), n)
     dummySelfCall.add(n)
 
   let prcName = case prc.name.kind
@@ -399,9 +310,9 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode
                 else: "unknown"
   let iterPtrName = "yasync_getIterPtr_" & prcName
 
-  var namedProcRegister = newNimNode(nnkStmtList)
+  result = newNimNode(nnkStmtList)
   if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
-    namedProcRegister = quote do:
+    result = quote do:
       const iterPtrName = genIterPtrName(`iterPtrName`)
       proc getIterPtr(): ProcType {.stacktrace: off, nimcall, exportc: iterPtrName.} =
         # The emit is a hacky optimization to avoid calling newObj
@@ -453,25 +364,31 @@ proc makeAsyncWrapper(prc, iterSym, iterDecl: NimNode, isCapture: bool): NimNode
         else:
           discard read(e)
 
+proc makeAsyncProcBody(prc, iterSym: NimNode, isCapture: bool): NimNode =
+  let envSym = ident("env")
+  let fillArgs = newNimNode(nnkStmtList)
 
-  prc.body = quote do:
-    asyncClosure2(`iterDecl`, `isCapture`)
+  # Fill arguments
+  var ip = 0
+  for i, n, t, d in arguments(prc.params):
+    if not isGenericArgType(t):
+      fillArgs.add newCall(bindSym"fillArgPtr", envSym, newLit(ip), n)
+      inc ip
 
-    `namedProcRegister`
-
+  result = quote do:
     var it = `iterSym`
     when `isCapture`:
       let `envSym` = cast[ref ContBase](rawEnv(it))
     else:
-      let `envSym` = cast[ref `getClosureEnvType`(`iterSym`)](rawEnv(it))
+      let `envSym` = cast[ref getClosureEnvType(`iterSym`)](rawEnv(it))
 
     GC_ref(`envSym`)
-    `markAllocatedEnv`(cast[ptr ContBase](`envSym`))
+    markAllocatedEnv(cast[ptr ContBase](`envSym`))
     result = cast[typeof(result)](`envSym`)
     setProc(getHeader(`envSym`[]), cast[ProcType](rawProc(it)))
     when not `isCapture`:
       `fillArgs`
-    `launchSym`(cast[ptr ContBase](`envSym`))
+    launch(cast[ptr ContBase](`envSym`))
 
 template assignResult[T](v: T) =
   when T is void:
@@ -484,25 +401,76 @@ proc fixupLastReturnStmt(body: NimNode): NimNode =
     body[^1] = newCall(bindSym"assignResult", body[^1])
   result = body
 
+proc makeTypedProcCopy(prc, body, resultType: NimNode): NimNode =
+  let body = copyNimTree(body)
+  let asyncTypedProcMarker = ident"<yasyncTypedProcMarker>"
+  let bd = quote do:
+    when `resultType` isnot void:
+      {.push warning[ResultShadowed]: off.}
+      var result: `resultType`
+      {.pop.}
+    var `asyncTypedProcMarker` {.used, inject.}: int
+    `body`
+
+  let params = newTree(nnkFormalParams, prc.params[0])
+  for i, n, t, d in arguments(prc.params):
+    if not isGenericArgType(t):
+      params.add(newIdentDefs(n, t, d))
+
+  result = newTree(nnkLambda,
+                   newEmptyNode(),
+                   newEmptyNode(),
+                   newEmptyNode(),
+                   copyNimTree(prc.params),
+                   newEmptyNode(),
+                   newEmptyNode(),
+                   bd)
+
+proc collectSubstate(n, stateObj: NimNode) =
+  if n.kind == nnkCall and n[0].kind == nnkSym:
+    let data = asyncData.getOrDefault(n[0])
+    if data.envType != nil:
+      let i = stateObj.len - 1
+      let subId = ident("sub" & $i)
+      stateObj.add newTree(nnkOfBranch, newLit(i), newIdentDefs(subId, data.envType))
+
+proc processSubstates(n, stateObj: NimNode) =
+  for i in 0 ..< n.len:
+    processSubstates(n[i], stateObj)
+
+  if n.kind == nnkCall and n[0].kind == nnkSym and $n[0] == "dummyAwaitMarkerMagic":
+    collectSubstate(n[1], stateObj)
+
+macro makeSubstates(a: typed): untyped =
+  let objStateRecCase = newTree(nnkRecCase, newIdentDefs(ident"sub", ident"uint8"))
+  objStateRecCase.add newTree(nnkOfBranch, newLit(0), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
+  processSubstates(a.body, objStateRecCase)
+  objStateRecCase.add newTree(nnkElse, newNilLit())
+  result = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))
+
 proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
+  result = prc
   let prcName = prc.name
   let name = if prcName.kind == nnkEmpty: ":anonymous" else: $prcName
 
   let iterSym = genSym(nskIterator, name & ":iter")
 
   var resultType = prc.params[0] or ident"void"
+  prc.params[0] = newTree(nnkBracketExpr, bindSym"Future", resultType)
 
   let hSym = ident"<h>"
   let resultSym = ident"result"
 
-  let argDefs = processArguments(prc)
-
+  let argDefs = makeArgDefs(prc)
   let body1 = fixupLastReturnStmt(prc.body)
   let body = transformReturnStmt(body1, resultSym)
+  let typedProcCopy = makeTypedProcCopy(prc, body, resultType)
 
-  let tmpFutId = ident"tmpFut"
-
-  let iterDecl = quote do:
+  let namedProcRegister = makeAsyncProcRegistration(prc, iterSym, isCapture)
+  let asyncProcBody = makeAsyncProcBody(prc, iterSym, isCapture)
+  let subIdent = ident"<yasyncSubstates>"
+  result.body = quote do:
+    type Substates = makeSubstates(`typedProcCopy`)
     iterator `iterSym`() {.closure.} =
       var `hSym` {.noinit.}: ContHeader
       keepFromReordering(`hSym`)
@@ -513,33 +481,10 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
         {.pop.}
       when not `isCapture`:
         `argDefs`
-      ##<STATE OBJ INSERTION POINT>
-      when `isCapture`:
-        var `tmpFutId`: FutureBase
-
+      var `subIdent` {.used, inject.}: Substates
       `body`
-
-  result = makeAsyncWrapper(prc, iterSym, iterDecl, isCapture)
-
-macro asyncLaunchWithEnv*(env: var AsyncEnv, call: typed{nkCall}): untyped =
-  call.expectKind(nnkCall)
-  let s = call[0]
-  s.expectKind(nnkSym)
-  let data = asyncData[s]
-  let iterPtrName = data.procPtrName
-  let fillArgs = newNimNode(nnkStmtList)
-  let envAccess = newTree(nnkDotExpr, env, ident"env")
-
-  # Fill arguments
-  for i in 1 ..< call.len:
-    fillArgs.add newCall(bindSym"fillArg", envAccess, newLit(i - 1), call[i])
-  result = quote do:
-    block:
-      block:
-        proc getIterPtr(): ProcType {.nimcall, importc: `iterPtrName`.}
-        getHeader(`envAccess`).p = getIterPtr()
-      `fillArgs`
-      launch(cast[ptr ContBase](addr `envAccess`))
+    `namedProcRegister`
+    `asyncProcBody`
 
 macro asyncRaw2(prc: typed): untyped =
   let s = prc.name
@@ -568,13 +513,97 @@ macro asyncClosureExperimental*(prc: untyped): untyped =
     assert(false)
     nil
 
+macro getStateIdxAux(substates: object, state: typedesc): untyped =
+  let recCase = getType(substates)[2][0]
+  # echo "SUB: ", treeRepr(recCase)
+  # echo "STATE: ", getType(state).treeRepr
+  for i in 2 ..< recCase.len - 1:
+    let s = recCase[i][1]
+    let t = getType(s)
+    if sameType(t, getType(state)[1]):
+      return recCase[i][0]
+  assert(false, "yasync internal error")
+
+template getStateIdx[T](substates: object, state: typedesc[AsyncEnv[T]]): untyped =
+  getStateIdxAux(substates, T)
+
+macro subAccess(sub: untyped, idx: static[int]): untyped =
+  newDotExpr(sub, ident("sub" & $idx))
+
+proc substateAtIndex[R](sub: var object, i: static[int]): var R {.stacktrace: off, linetrace: off, inline.} =
+  when defined(yasyncDebug):
+    return subAccess(sub, i)
+  else:
+    {.push fieldChecks: off.}
+    return subAccess(sub, i)
+    {.pop.}
+
+proc tmpFutSubstate[T](sub: var T): var FutureBase {.stacktrace: off, linetrace: off, inline.} =
+  when defined(yasyncDebug):
+    return sub.tmpFut
+  else:
+    {.push fieldChecks: off.}
+    return sub.tmpFut
+    {.pop.}
+
+macro fillArgs(subAccess: untyped, n: typed): untyped =
+  result = newNimNode(nnkStmtList)
+  let prc = n[0]
+  let typ = getTypeImpl(prc)
+  var pi = 0
+  for i, _, t, d in arguments(typ.params):
+    if not isGenericArgType(t):
+      result.add newCall(bindSym"fillArg", subAccess, newLit(pi), n[i + 1])
+      inc pi
+
+proc checkVarDeclared[T](a: var T) = discard
+
+proc resetSubstate[T](s: var T, idx: uint8) {.inline, stackTrace: off, lineTrace: off.} =
+  s = T(sub: idx)
 
 template await*[T](f: ref Cont[T]): T =
   if false:
     discard f
-  dummyAwaitMarkerMagic(f)
 
-template await*(f: ref Cont[void]) =
-  if false:
-    discard f
-  dummyAwaitMarkerMagic(f)
+  when compiles(checkVarDeclared(`<yasyncSubstates>`)):
+    block:
+      type Env = asyncCallEnvType(f)
+      when Env is void:
+        `<yasyncSubstates>`.resetSubstate(0)
+        `<yasyncSubstates>`.tmpFutSubstate() = f
+        if not `<yasyncSubstates>`.tmpFutSubstate.finished:
+          `<yasyncSubstates>`.tmpFutSubstate.h.e = thisEnv(`<h>`)
+          yield
+        cast[Future[T]](`<yasyncSubstates>`.tmpFutSubstate).read()
+      else:
+        const stateIdx = getStateIdx(`<yasyncSubstates>`, Env).int
+        const procPtrName = asyncCallProcPtrName(f)
+        `<yasyncSubstates>`.resetSubstate(stateIdx.uint8)
+        template subs: untyped =
+          substateAtIndex[typeof(Env.env)](`<yasyncSubstates>`, stateIdx)
+
+        getHeader(subs).e = thisEnv(`<h>`)
+        when procPtrName == "":
+          {.error: "Not implemented yet.".}
+          dummyAwaitMarkerMagic(f)
+        else:
+          proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
+          getHeader(subs).p = getIterPtr()
+          fillArgs(subs, f)
+
+          if launchf(cast[ptr ContBase](addr subs)):
+            yield
+          checkFinished(cast[ptr ContBase](addr subs))
+          readAux(subs)
+  elif compiles(checkVarDeclared(`<yasyncTypedProcMarker>`)):
+    dummyAwaitMarkerMagic(f)
+  else:
+    {.error: "await can only be used inside async function".}
+
+template asyncLaunchWithEnv*(aenv: var AsyncEnv, call: FutureBase{nkCall}) =
+  block:
+    const procPtrName = asyncCallProcPtrName(call)
+    proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
+    getHeader(aenv.env).p = getIterPtr()
+    fillArgs(aenv.env, call)
+    launch(cast[ptr ContBase](addr aenv.env))
