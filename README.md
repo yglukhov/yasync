@@ -1,4 +1,4 @@
-# yasync - Yet another async/await for Nim [![Build Status](https://github.com/yglukhov/yasync/workflows/CI/badge.svg?branch=main)](https://github.com/yglukhov/yasync/actions?query=branch%3Amain)
+# yasync - Yet another async/await for Nim [![Build Status](https://github.com/yglukhov/yasync/workflows/CI/badge.svg?branch=main)](https://github.com/yglukhov/yasync/actions?query=branch%3Amain) [![nimble](https://img.shields.io/badge/nimble-black?logo=nim&style=flat&labelColor=171921&color=%23f3d400)](https://nimble.directory/pkg/yasync)
 
 **Requires nim devel or 2.0.**
 
