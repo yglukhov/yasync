@@ -265,6 +265,9 @@ macro getClosureEnvType(a: typed): untyped =
 macro registerAsyncData(dummyCall: typed, procPtrName: static[string], iterSym: typed): untyped =
   asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), procPtrName: procPtrName)
 
+macro registerAsyncRawData(dummyCall: typed, procPtrName: static[string], envType: typed): untyped =
+  asyncData[dummyCall[0]] = AsyncProcData(envType: envType, procPtrName: procPtrName)
+
 macro asyncCallEnvType*(call: Future): untyped =
   ## Returns type of async environment for the `call`
   ## This type can be used with `asyncLaunchWithEnv`
@@ -288,21 +291,24 @@ proc genIterPtrName(s: string): string {.compileTime.} =
   inc counter
   s & "_" & $counter
 
-proc makeAsyncProcRegistration(prc, iterSym: NimNode, isCapture: bool): NimNode =
-  let dummySelfCall = newCall(prc.name)
+proc makeDummySelfCall(prc: NimNode): NimNode =
+  result = newCall(prc.name)
 
   let genericParams = prc[2]
   genericParams.expectKind({nnkEmpty, nnkGenericParams})
   if genericParams.kind == nnkGenericParams:
-    let genericCall = newTree(nnkBracketExpr, dummySelfCall[0])
+    let genericCall = newTree(nnkBracketExpr, result[0])
     for p in genericParams:
       for i in 0 ..< p.len - 2:
         genericCall.add(p[i])
-    dummySelfCall[0] = genericCall
+    result[0] = genericCall
 
   # Fill arguments
   for i, n, t, d in arguments(prc.params):
-    dummySelfCall.add(n)
+    result.add(n)
+
+proc makeAsyncProcRegistration(prc, iterSym: NimNode, isCapture: bool): NimNode =
+  let dummySelfCall = makeDummySelfCall(prc)
 
   let prcName = case prc.name.kind
                 of nnkSym, nnkIdent: $prc.name
@@ -486,16 +492,89 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
     `namedProcRegister`
     `asyncProcBody`
 
-macro asyncRaw2(prc: typed): untyped =
-  let s = prc.name
-  var lastArgType = prc.params[^1][^2]
-  let ptrBase = lastArgType[^1]
-  asyncData[s] = AsyncProcData(envType: ptrBase)
-  result = prc
+template rawRetType(t: typedesc): typedesc = Future[typeof(read(default(t)[]))]
 
 macro asyncRaw*(prc: untyped): untyped =
-  prc.params[0] = newEmptyNode()
-  result = newCall(bindSym"asyncRaw2", prc)
+  ## used to define a low-level async procedure
+  ## that works with a pre-allocated env. The last parameter
+  ## to such procedure must be a pointer to a derivative of `Cont[T]`
+  ## type, where `T` is async return type. The actual return type
+  ## must be void, regardless of `T`.
+  ##
+  ## Example 1:
+  ## proc sleep(milliseconds: int, env: ptr Cont[void]) {.asyncRaw.} =
+  ##   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
+  ##     env.complete()
+  ## # Works as if it was `proc sleep(ms: int) {.async.}`
+  ## waitFor sleep(5)
+  ##
+  ## Example 2:
+  ## proc fetchUrl(url: string, env: ptr Cont[string]) {.asyncRaw.} =
+  ##   someHttpClient.onComplete = proc(contents: string) =
+  ##     env.complete(contents)
+  ##   someHttpClient.startFetch(url)
+  ## # Works as if it was `proc fetchUrl(url: string): string {.async.}`
+  ## echo waitFor fetch("http://example.com")
+  ##
+  ## Defining custom Env type (must derived from `Cont[T]`!) may be beneficial
+  ## to store contextual data in the environment, avoiding extra allocations
+  ##
+  ## Example 3:
+  ## type AllocationFreeEnv = object of Cont[int]
+  ##   someNumber: int
+  ##
+  ## proc startSomeComputation(context: pointer, callback: proc(c: pointer) {.cdecl.})
+  ##
+  ## proc myCallback(computationResult: int, env: ptr AllocationFreeEnv) {.cdecl.} =
+  ##   echo "Computation complete. Adding the number now..."
+  ##   env.complete(env.someNumber + computationResult)
+  ##
+  ## proc myEfficientComputationPlusSomeNumber(someNumber: int, env: ptr AllocationFreeEnv) =
+  ##   env.someNumber = someNumber
+  ##   startSomeComputationApi(env, cast[proc(c: pointer) {.cdecl.}](myCallback))
+  ##
+  ## # Works as if it was `proc myEfficientComputationPlusSomeNumber(someNumber: int): int {.async.}`
+  ## echo waitFor myEfficientComputationPlusSomeNumber(5)
+
+
+  let innerPrc = copyNimTree(prc)
+  let prcName = prc.name.basename
+  innerPrc[0] = prcName # reset stars in name
+  let prms = prc.params
+  var lastArgType = prms[^1][^2]
+  prms.del(prms.len - 1)
+
+  let retType = newCall(bindsym"rawRetType", lastArgType)
+  prms[0] = retType
+
+  let innerCall = newCall(prcName)
+  let envSym = ident"env"
+
+  for i, n, t, d in arguments(prc.params):
+    innerCall.add(n)
+  innerCall.add quote do:
+    cast[`lastArgType`](`envSym`)
+  result = prc
+
+  let dummySelfCall = makeDummySelfCall(prc)
+  let iterPtrCName = ident"iterPtrCName"
+  let rawProcPtrName = "yasync_raw_" & $prcName
+
+  innerPrc.addPragma(ident"nimcall")
+  innerPrc.addPragma(newTree(nnkExprColonExpr, ident"exportc", iterPtrCName))
+
+  prc.body = quote do:
+    const `iterPtrCName` = genIterPtrName(`rawProcPtrName`)
+    `innerPrc`
+    registerAsyncRawData(`dummySelfCall`, `iterPtrCName`, typeof(default(`lastArgType`)[]))
+    var `envSym`: ref typeof(default(`lastArgType`)[])
+    `envSym`.new()
+    GC_ref(`envSym`)
+    markAllocatedEnv(cast[ptr ContBase](`envSym`))
+    `innerCall`
+    return cast[typeof(result)](`envSym`)
+
+  # echo repr(result)
 
 macro async*(prc: untyped): untyped =
   case prc.kind
@@ -561,6 +640,28 @@ proc checkVarDeclared[T](a: var T) = discard
 proc resetSubstate[T](s: var T, idx: uint8) {.inline, stackTrace: off, lineTrace: off.} =
   s = T(sub: idx)
 
+macro makeRawCall(call: typed, env: typed): untyped =
+  let d = asyncData[call[0]]
+  assert(d.procPtrName.startsWith("yasync_raw_"))
+
+  let typ = getType(call[0])
+  let prc = newProc(ident"inner")
+  let prms = newTree(nnkFormalParams, ident"void")
+  let innerCall = newCall("inner")
+  for i in 2 ..< typ.len:
+    prms.add(newIdentDefs(ident("arg" & $i ), typ[i]))
+    innerCall.add(call[i - 1])
+
+  prms.add(newIdentDefs(ident"env", newCall("typeof", env)))
+  innerCall.add(env)
+  prc.params = prms
+  prc.addPragma(ident"nimcall")
+  prc.addPragma(newTree(nnkExprColonExpr, ident"importc", newLit(d.procPtrName)))
+  result = quote do:
+    block:
+      `prc`
+      `innerCall`
+
 template await*[T](f: ref Cont[T]): T =
   if false:
     discard f
@@ -583,9 +684,10 @@ template await*[T](f: ref Cont[T]): T =
           substateAtIndex[typeof(Env.env)](`<yasyncSubstates>`, stateIdx)
 
         getHeader(subs).e = thisEnv(`<h>`)
-        when procPtrName == "":
-          {.error: "Not implemented yet.".}
-          dummyAwaitMarkerMagic(f)
+        when procPtrName.startsWith("yasync_raw_"):
+          makeRawCall(f, addr subs)
+          if not subs.finished:
+            yield
         else:
           proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
           getHeader(subs).p = getIterPtr()
@@ -603,7 +705,10 @@ template await*[T](f: ref Cont[T]): T =
 template asyncLaunchWithEnv*(aenv: var AsyncEnv, call: FutureBase{nkCall}) =
   block:
     const procPtrName = asyncCallProcPtrName(call)
-    proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
-    getHeader(aenv.env).p = getIterPtr()
-    fillArgs(aenv.env, call)
-    launch(cast[ptr ContBase](addr aenv.env))
+    when procPtrName.startsWith("yasync_raw_"):
+      makeRawCall(call, addr aenv.env)
+    else:
+      proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
+      getHeader(aenv.env).p = getIterPtr()
+      fillArgs(aenv.env, call)
+      launch(cast[ptr ContBase](addr aenv.env))

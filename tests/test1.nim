@@ -13,13 +13,14 @@ proc foo(a: int) {.async.} =
   log "hi"
   await sleep2(10)
   log 1
-  await sleep(10)
-  await sleep(10)
+  await sleep(5)
+  await sleep(5)
   log "bye: ", a
 
 proc bar(yo: string) {.async.} =
   log "yo: ", yo
   await foo(5)
+  await sleepRaw(5)
   log "bar"
 
 waitFor bar("hi")
@@ -74,3 +75,5 @@ proc baz2() {.async.} =
   log "B: ", (await baz(5)) + (await baz(10))
 
 waitFor baz2()
+
+waitFor sleepRaw(5)

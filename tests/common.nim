@@ -33,7 +33,7 @@ addExitProc do():
   checkOutput()
   echo "OK"
 
-proc sleep*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
+proc sleepRaw*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
     env.complete()
 
