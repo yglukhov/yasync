@@ -24,6 +24,7 @@ proc toCompat*[T](f: yasync.Future[T]): asyncdispatch.Future[T] =
         asyncdispatch.complete(res, v)
 
 template awaitc*[T](f: asyncdispatch.Future[T]): T =
+  bind stdFutureToFuture
   yasync.await(stdFutureToFuture(f))
 
 proc waitForButDontRead(f: FutureBase) =
