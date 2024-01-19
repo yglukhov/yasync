@@ -71,3 +71,18 @@ proc generic4[T](a: int): T {.async.} =
   T(a)
 
 log waitFor generic4[int](123)
+
+expectOutput """
+10
+"""
+
+type OOO[T] = object
+  m: int
+
+proc genericRaw1[T](a: OOO[T], env: ptr Cont[T]) {.asyncRaw.} =
+  env.complete(a.m + 5)
+
+proc foo1() {.async.} =
+  log await genericRaw1(OOO[int](m: 5))
+
+waitFor foo1()

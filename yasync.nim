@@ -27,6 +27,8 @@ type
   AsyncEnv*[T] = object
     env*: T
 
+{.pragma: silent, inline, stackTrace: off, lineTrace: off.}
+
 proc finished(f: ContBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished(f: ptr ContBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished*(f: FutureBase): bool {.inline.} = f.`<state_reserved>` < 0
@@ -70,10 +72,10 @@ proc resume(p: ptr ContBase) =
         break
   {.pop.}
 
-proc launch(p: ptr ContBase) {.inline.} =
+proc launch(p: ptr ContBase) {.silent.} =
   p.h.p(p)
 
-proc launchf(p: ptr ContBase): bool {.inline.} =
+proc launchf(p: ptr ContBase): bool {.silent.} =
   launch(p)
   not finished(p)
 
@@ -92,7 +94,7 @@ proc complete*[T](resFut: Future[T], v: T) {.inline.} =
 proc complete*(resFut: Future[void]) {.inline.} =
   complete(cast[ptr Cont[void]](resFut))
 
-proc fail(resFut: ptr ContBase, err: ref Exception) =
+proc fail*(resFut: ptr ContBase, err: ref Exception) =
   resFut.setStateFinished()
   resFut.h.error = err
   resume(resFut)
@@ -249,9 +251,9 @@ template fillArg[TEnv, TArg](e: var TEnv, idx: int, arg: TArg) =
 template fillArgPtr[TEnv, TArg](e: ref TEnv, idx: int, arg: TArg) =
   argFieldAccess(e[], idx) = arg
 
-proc dummyAwaitMarkerMagic[T](f: Future[T]): T {.importc: "yasync_report_error_if_this_symbol_is_missing_on_linkage".}
+proc dummyAwaitMarkerMagic[T](f: Future[T]): T {.importc: "yasync_please_report_bug_if_this_symbol_is_missing_on_linkage".}
 
-proc getHeader[T](env: var T): ptr ContHeader {.inline, stackTrace: off.} =
+proc getHeader[T](env: var T): ptr ContHeader {.silent.} =
   cast[ptr ContHeader](cast[int](addr env) + offsetof(ContBase, h))
 
 proc closureEnvType(a: NimNode): NimNode =
@@ -492,9 +494,9 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
     `namedProcRegister`
     `asyncProcBody`
 
-template rawRetType(t: typedesc): typedesc = Future[typeof(read(default(t)[]))]
+template rawRetType[T](t: typedesc[Cont[T]]): typedesc = Cont[T]
 
-macro asyncRaw*(prc: untyped): untyped =
+macro asyncRaw*(prc: untyped{nkProcDef}): untyped =
   ## used to define a low-level async procedure
   ## that works with a pre-allocated env. The last parameter
   ## to such procedure must be a pointer to a derivative of `Cont[T]`
@@ -539,15 +541,18 @@ macro asyncRaw*(prc: untyped): untyped =
 
   let innerPrc = copyNimTree(prc)
   let prcName = prc.name.basename
-  innerPrc[0] = prcName # reset stars in name
+  innerPrc[0] = genSym(nskProc, $prcName) # reset stars in name
+  innerPrc.params[0] = newEmptyNode()
+  innerPrc[2] = newEmptyNode() # reset generic params
   let prms = prc.params
   var lastArgType = prms[^1][^2]
   prms.del(prms.len - 1)
 
-  let retType = newCall(bindsym"rawRetType", lastArgType)
-  prms[0] = retType
+  let retType = ident"auto"
+  if prms[0].kind == nnkEmpty:
+    prms[0] = retType
 
-  let innerCall = newCall(prcName)
+  let innerCall = newCall(innerPrc.name)
   let envSym = ident"env"
 
   for i, n, t, d in arguments(prc.params):
@@ -564,17 +569,18 @@ macro asyncRaw*(prc: untyped): untyped =
   innerPrc.addPragma(newTree(nnkExprColonExpr, ident"exportc", iterPtrCName))
 
   prc.body = quote do:
+    type Env = typeof(default(`lastArgType`)[])
+    if false:
+      return rawRetType(Env).new() # Make nim infer return type
     const `iterPtrCName` = genIterPtrName(`rawProcPtrName`)
     `innerPrc`
-    registerAsyncRawData(`dummySelfCall`, `iterPtrCName`, typeof(default(`lastArgType`)[]))
-    var `envSym`: ref typeof(default(`lastArgType`)[])
+    registerAsyncRawData(`dummySelfCall`, `iterPtrCName`, Env)
+    var `envSym`: ref Env
     `envSym`.new()
     GC_ref(`envSym`)
     markAllocatedEnv(cast[ptr ContBase](`envSym`))
     `innerCall`
-    return cast[typeof(result)](`envSym`)
-
-  # echo repr(result)
+    return `envSym`
 
 macro async*(prc: untyped): untyped =
   case prc.kind
@@ -609,7 +615,7 @@ template getStateIdx[T](substates: object, state: typedesc[AsyncEnv[T]]): untype
 macro subAccess(sub: untyped, idx: static[int]): untyped =
   newDotExpr(sub, ident("sub" & $idx))
 
-proc substateAtIndex[R](sub: var object, i: static[int]): var R {.stacktrace: off, linetrace: off, inline.} =
+proc substateAtIndex[R](sub: var object, i: static[int]): var R {.silent.} =
   when defined(yasyncDebug):
     return subAccess(sub, i)
   else:
@@ -617,7 +623,7 @@ proc substateAtIndex[R](sub: var object, i: static[int]): var R {.stacktrace: of
     return subAccess(sub, i)
     {.pop.}
 
-proc tmpFutSubstate[T](sub: var T): var FutureBase {.stacktrace: off, linetrace: off, inline.} =
+proc tmpFutSubstate[T](sub: var T): var FutureBase {.silent.} =
   when defined(yasyncDebug):
     return sub.tmpFut
   else:
@@ -637,7 +643,7 @@ macro fillArgs(subAccess: untyped, n: typed): untyped =
 
 proc checkVarDeclared[T](a: var T) = discard
 
-proc resetSubstate[T](s: var T, idx: uint8) {.inline, stackTrace: off, lineTrace: off.} =
+proc resetSubstate[T](s: var T, idx: uint8) {.silent.} =
   s = T(sub: idx)
 
 macro makeRawCall(call: typed, env: typed): untyped =
@@ -649,7 +655,14 @@ macro makeRawCall(call: typed, env: typed): untyped =
   let prms = newTree(nnkFormalParams, ident"void")
   let innerCall = newCall("inner")
   for i in 2 ..< typ.len:
-    prms.add(newIdentDefs(ident("arg" & $i ), typ[i]))
+    # Instead of using arg type from `typ`, we're defining argTyp as typeof(arg)
+    # This may seem unsafe because implicit conversions might not be applied,
+    # but it appears to be safe, even though treeRepr(result) doesn't show that.
+    # This is likely because the arguments have already passed semantic phase,
+    # gained their types and it's not going to change. There's a test for this
+    # in test1.nim (grep asyncRaw implicit conversions).
+    let argTyp = newCall("typeof", call[i - 1])
+    prms.add(newIdentDefs(ident("arg" & $i ), argTyp))
     innerCall.add(call[i - 1])
 
   prms.add(newIdentDefs(ident"env", newCall("typeof", env)))
@@ -661,6 +674,7 @@ macro makeRawCall(call: typed, env: typed): untyped =
     block:
       `prc`
       `innerCall`
+  # echo "RAW: ", repr result
 
 template await*[T](f: ref Cont[T]): T =
   if false:
@@ -683,18 +697,20 @@ template await*[T](f: ref Cont[T]): T =
         template subs: untyped =
           substateAtIndex[typeof(Env.env)](`<yasyncSubstates>`, stateIdx)
 
-        getHeader(subs).e = thisEnv(`<h>`)
         when procPtrName.startsWith("yasync_raw_"):
           makeRawCall(f, addr subs)
           if not subs.finished:
+            getHeader(subs).e = thisEnv(`<h>`)
             yield
+          read(subs)
         else:
           proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
           getHeader(subs).p = getIterPtr()
           fillArgs(subs, f)
-
           if launchf(cast[ptr ContBase](addr subs)):
+            getHeader(subs).e = thisEnv(`<h>`)
             yield
+
           checkFinished(cast[ptr ContBase](addr subs))
           readAux(subs)
   elif compiles(checkVarDeclared(`<yasyncTypedProcMarker>`)):

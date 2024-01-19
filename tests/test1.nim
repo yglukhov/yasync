@@ -77,3 +77,29 @@ proc baz2() {.async.} =
 waitFor baz2()
 
 waitFor sleepRaw(5)
+
+expectOutput """
+0
+1
+2
+"""
+
+proc emptyProc() {.async.} =
+  log 1
+
+proc callEmpty() {.async.} =
+  log 0
+  await emptyProc()
+  log 2
+
+discard callEmpty()
+
+# asyncRaw implicit conversions
+expectOutput """
+10.0
+"""
+
+proc rawProc1(a: float, env: ptr Cont[float]) {.asyncRaw.} =
+  env.complete(a * 2)
+
+log waitFor rawProc1 5
