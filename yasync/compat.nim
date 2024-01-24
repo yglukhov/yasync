@@ -1,6 +1,8 @@
 from std/asyncdispatch import nil
 import ../yasync
 
+# The following function should be an asyncRaw, but unfortunately
+# it causes a crash in nim
 proc stdFutureToFuture[T](f: asyncdispatch.Future[T]): yasync.Future[T] =
   result.new()
   let res = result
@@ -8,28 +10,10 @@ proc stdFutureToFuture[T](f: asyncdispatch.Future[T]): yasync.Future[T] =
     if unlikely asyncdispatch.failed(f):
       res.fail(f.error)
     else:
-      res.complete(asyncdispatch.read(f))
-
-proc stdFutureToFuture(f: asyncdispatch.Future[void]): yasync.Future[void] =
-  result.new()
-  let res = result
-  asyncdispatch.addCallback(f) do():
-    if unlikely asyncdispatch.failed(f):
-      res.fail(f.error)
-    else:
-      res.complete()
-
-# The following function should be a replacement of the two above, but unfortunately
-# it causes a crash in nim
-# proc stdFutureToFuture[T](f: asyncdispatch.Future[T], env: ptr Cont[T]) {.asyncRaw.} =
-#   asyncdispatch.addCallback(f) do():
-#     if unlikely asyncdispatch.failed(f):
-#       env.fail(f.error)
-#     else:
-#       when T is void:
-#         env.complete()
-#       else:
-#         env.complete(asyncdispatch.read(f))
+      when T is void:
+        res.complete()
+      else:
+        res.complete(asyncdispatch.read(f))
 
 proc toCompat*[T](f: yasync.Future[T]): asyncdispatch.Future[T] =
   result = asyncdispatch.newFuture[T]()
