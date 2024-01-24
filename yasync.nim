@@ -248,7 +248,7 @@ macro argFieldAccess(o: typed, idx: static[int]): untyped =
 template fillArg[TEnv, TArg](e: var TEnv, idx: int, arg: TArg) =
   argFieldAccess(e, idx) = arg
 
-template fillArgPtr[TEnv, TArg](e: ref TEnv, idx: int, arg: TArg) =
+template fillArgPtr[TEnv, TArg](e: ref TEnv | ptr TEnv, idx: int, arg: TArg) =
   argFieldAccess(e[], idx) = arg
 
 proc dummyAwaitMarkerMagic[T](f: Future[T]): T {.importc: "yasync_please_report_bug_if_this_symbol_is_missing_on_linkage".}
@@ -280,11 +280,14 @@ macro asyncCallEnvType*(call: Future): untyped =
       return newTree(nnkBracketExpr, bindSym"AsyncEnv", d.envType)
   return ident"void"
 
-macro asyncCallProcPtrName(call: Future): untyped =
+proc asyncCallProcPtrNameAux(call: NimNode): string =
   call.expectKind(nnkCall)
   let d = asyncData.getOrDefault(call[0])
   doAssert(d.envType != nil, "yasync internal error")
-  newLit(d.procPtrName)
+  d.procPtrName
+
+macro asyncCallProcPtrName(call: Future): untyped =
+  newLit(asyncCallProcPtrNameAux(call))
 
 template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
 
@@ -494,7 +497,7 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
     `namedProcRegister`
     `asyncProcBody`
 
-template rawRetType[T](t: typedesc[Cont[T]]): typedesc = Cont[T]
+proc rawRetType[T](t: typedesc[Cont[T]]): ref Cont[T] = discard
 
 macro asyncRaw*(prc: untyped{nkProcDef}): untyped =
   ## used to define a low-level async procedure
@@ -570,8 +573,7 @@ macro asyncRaw*(prc: untyped{nkProcDef}): untyped =
 
   prc.body = quote do:
     type Env = typeof(default(`lastArgType`)[])
-    if false:
-      return rawRetType(Env).new() # Make nim infer return type
+    if false: return rawRetType(Env) # Make nim infer return type
     const `iterPtrCName` = genIterPtrName(`rawProcPtrName`)
     `innerPrc`
     registerAsyncRawData(`dummySelfCall`, `iterPtrCName`, Env)
@@ -615,12 +617,13 @@ template getStateIdx[T](substates: object, state: typedesc[AsyncEnv[T]]): untype
 macro subAccess(sub: untyped, idx: static[int]): untyped =
   newDotExpr(sub, ident("sub" & $idx))
 
-proc substateAtIndex[R](sub: var object, i: static[int]): var R {.silent.} =
+proc substateAtIndex(sub: var object, i: static[uint8]): auto {.silent.} =
+  const i = i.int
   when defined(yasyncDebug):
-    return subAccess(sub, i)
+    return addr subAccess(sub, i)
   else:
     {.push fieldChecks: off.}
-    return subAccess(sub, i)
+    return addr subAccess(sub, i)
     {.pop.}
 
 proc tmpFutSubstate[T](sub: var T): var FutureBase {.silent.} =
@@ -630,6 +633,13 @@ proc tmpFutSubstate[T](sub: var T): var FutureBase {.silent.} =
     {.push fieldChecks: off.}
     return sub.tmpFut
     {.pop.}
+
+proc resetSubstate[T](s: var T, idx: uint8) {.silent.} =
+  s = T(sub: idx)
+
+proc setTmpFutSubstate[T](sub: var T, f: FutureBase) {.silent.} =
+  sub.resetSubstate(0)
+  sub.tmpFutSubstate() = f
 
 macro fillArgs(subAccess: untyped, n: typed): untyped =
   result = newNimNode(nnkStmtList)
@@ -642,9 +652,6 @@ macro fillArgs(subAccess: untyped, n: typed): untyped =
       inc pi
 
 proc checkVarDeclared[T](a: var T) = discard
-
-proc resetSubstate[T](s: var T, idx: uint8) {.silent.} =
-  s = T(sub: idx)
 
 macro makeRawCall(call: typed, env: typed): untyped =
   let d = asyncData[call[0]]
@@ -674,7 +681,74 @@ macro makeRawCall(call: typed, env: typed): untyped =
     block:
       `prc`
       `innerCall`
-  # echo "RAW: ", repr result
+
+macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: untyped): untyped =
+  let procPtrName = asyncCallProcPtrNameAux(f)
+  let setupEnv = genSym(nskProc, "setupEnv")
+  let stateIdx = ident"stateIdx"
+  let pEnv = ident"pEnv"
+  let subs = ident"subs"
+
+  let wrapperDef = quote do:
+    proc `setupEnv`(substates: var object) {.stacktrace: off, inline.} =
+      substates.resetSubstate(`stateIdx`)
+      let `pEnv` = substateAtIndex(substates, `stateIdx`)
+
+  let wrapperCall = newCall(setupEnv, substates)
+  let wrapperParams = wrapperDef.params
+  let wrapperBody = wrapperDef.body
+  let isRaw = procPtrName.startsWith("yasync_raw_")
+  var rawProcDef, rawProcCall, rawProcParams: NimNode
+
+  if isRaw:
+    let rawProc = genSym(nskProc, "rawProc")
+    rawProcCall = newCall(rawProc)
+    rawProcDef = quote do:
+      proc `rawProc`() {.nimcall, importc: `procPtrName`.}
+    rawProcParams = rawProcDef.params
+  else:
+    wrapperBody.add quote do:
+      proc getIterPtr(): ProcType {.nimcall, importc: `procPtrName`.}
+      setProc(getHeader(`pEnv`[]), getIterPtr())
+
+  for i in 1 ..< f.len:
+    let argId = ident("arg" & $i)
+    wrapperParams.add newIdentDefs(argId, newCall("typeof", f[i]))
+    wrapperCall.add(f[i])
+    if isRaw:
+      rawProcParams.add newIdentDefs(argId, newCall("typeof", argId))
+      rawProcCall.add(argId)
+    else:
+      wrapperBody.add(newCall(bindSym"fillArgPtr", pEnv, newLit(i - 1), argId))
+
+  if isRaw:
+    rawProcParams.add newIdentDefs(ident"env", newCall("typeof", `subs`))
+    rawProcCall.add(pEnv)
+    wrapperBody.add(rawProcDef)
+    wrapperBody.add(rawProcCall)
+
+  result = quote do:
+    const `stateIdx` = getStateIdx(`substates`, `Env`)
+    template `subs`: untyped =
+      substateAtIndex(`substates`, `stateIdx`)
+    block:
+      `wrapperDef`
+      `wrapperCall`
+
+  if isRaw:
+    result.add quote do:
+      if not `subs`.finished:
+        getHeader(`subs`[]).e = `thisEnv`
+        yield
+      read(`subs`[])
+  else:
+    result.add quote do:
+      if launchf(cast[ptr ContBase](`subs`)):
+        getHeader(`subs`[]).e = `thisEnv`
+        yield
+
+      checkFinished(cast[ptr ContBase](`subs`))
+      readAux(`subs`[])
 
 template await*[T](f: ref Cont[T]): T =
   if false:
@@ -684,35 +758,13 @@ template await*[T](f: ref Cont[T]): T =
     block:
       type Env = asyncCallEnvType(f)
       when Env is void:
-        `<yasyncSubstates>`.resetSubstate(0)
-        `<yasyncSubstates>`.tmpFutSubstate() = f
+        `<yasyncSubstates>`.setTmpFutSubstate(f)
         if not `<yasyncSubstates>`.tmpFutSubstate.finished:
           `<yasyncSubstates>`.tmpFutSubstate.h.e = thisEnv(`<h>`)
           yield
         cast[Future[T]](`<yasyncSubstates>`.tmpFutSubstate).read()
       else:
-        const stateIdx = getStateIdx(`<yasyncSubstates>`, Env).int
-        const procPtrName = asyncCallProcPtrName(f)
-        `<yasyncSubstates>`.resetSubstate(stateIdx.uint8)
-        template subs: untyped =
-          substateAtIndex[typeof(Env.env)](`<yasyncSubstates>`, stateIdx)
-
-        when procPtrName.startsWith("yasync_raw_"):
-          makeRawCall(f, addr subs)
-          if not subs.finished:
-            getHeader(subs).e = thisEnv(`<h>`)
-            yield
-          read(subs)
-        else:
-          proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
-          getHeader(subs).p = getIterPtr()
-          fillArgs(subs, f)
-          if launchf(cast[ptr ContBase](addr subs)):
-            getHeader(subs).e = thisEnv(`<h>`)
-            yield
-
-          checkFinished(cast[ptr ContBase](addr subs))
-          readAux(subs)
+        awaitSubstateImpl(`<yasyncSubstates>`, Env, f, thisEnv(`<h>`))
   elif compiles(checkVarDeclared(`<yasyncTypedProcMarker>`)):
     dummyAwaitMarkerMagic(f)
   else:

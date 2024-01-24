@@ -39,3 +39,12 @@ expectOutput """
 """
 
 asyncdispatch.waitFor fooVoid().toCompat()
+
+import asyncdispatch_functions
+
+proc getContent() {.async.} =
+  let content = awaitc (awaitc getResponse()).body
+  assert(content == "hello")
+  echo content
+
+common.waitFor getContent()

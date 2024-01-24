@@ -1,11 +1,7 @@
 from std/asyncdispatch import nil
 import ../yasync
 
-# The following function should be an asyncRaw, but unfortunately
-# it causes a crash in nim
-proc stdFutureToFuture[T](f: asyncdispatch.Future[T]): yasync.Future[T] =
-  result.new()
-  let res = result
+proc stdFutureToFuture[T](f: asyncdispatch.Future[T], res: ptr Cont[T]) {.asyncRaw.} =
   asyncdispatch.addCallback(f) do():
     if unlikely asyncdispatch.failed(f):
       res.fail(f.error)
