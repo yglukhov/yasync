@@ -294,7 +294,14 @@ template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
 var counter {.compileTime.} = 0
 proc genIterPtrName(s: string): string {.compileTime.} =
   inc counter
-  s & "_" & $counter
+  var i = 0
+  result = s & "_" & $counter
+  while i < result.len:
+    let c = result[i]
+    if c notin {'A'..'Z','a'..'z','_','0'..'9'}:
+      result.delete(i .. i)
+    else:
+      inc i
 
 proc makeDummySelfCall(prc: NimNode): NimNode =
   result = newCall(prc.name)
@@ -311,69 +318,6 @@ proc makeDummySelfCall(prc: NimNode): NimNode =
   # Fill arguments
   for i, n, t, d in arguments(prc.params):
     result.add(n)
-
-proc makeAsyncProcRegistration(prc, iterSym: NimNode, isCapture: bool): NimNode =
-  let dummySelfCall = makeDummySelfCall(prc)
-
-  let prcName = case prc.name.kind
-                of nnkSym, nnkIdent: $prc.name
-                of nnkEmpty: "anonymous"
-                else: "unknown"
-  let iterPtrName = "yasync_getIterPtr_" & prcName
-
-  result = newNimNode(nnkStmtList)
-  if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
-    result = quote do:
-      const iterPtrName = genIterPtrName(`iterPtrName`)
-      proc getIterPtr(): ProcType {.stacktrace: off, nimcall, exportc: iterPtrName.} =
-        # The emit is a hacky optimization to avoid calling newObj
-        # and eventually allow the C optimizer to collapse it
-        # entirely.
-        when defined(gcDestructors):
-          {.emit: """
-          struct {
-            RootObj Sup;
-          } dummy;
-          #define nimNewObj(a, b) ((void*)&dummy)
-          #define nimCopyMem(a, b, c)
-          """.}
-        else:
-          {.emit: """
-          struct {
-            struct {
-              TNimType* m_type;
-            } Sup;
-          } dummy;
-          #define newObj(a, b) ((void*)&dummy)
-          """.}
-
-        result = cast[ProcType](rawProc(`iterSym`))
-        when defined(gcDestructors):
-          {.emit: """
-
-          #undef nimNewObj
-          #undef nimCopyMem
-          colontmpD_ = NIM_NIL;
-          """.}
-        else:
-          {.emit: """
-          #undef newObj
-          """.}
-
-      if false:
-        discard getIterPtr()
-
-      registerAsyncData(`dummySelfCall`, iterPtrName, `iterSym`)
-
-      proc dummy() {.used.} =
-        # Workaround nim bug. Without this proc nim sometimes fails
-        # to instantiate waitFor code. This bug is not demonstrated
-        # in the tests.
-        var e: asyncCallEnvType(`dummySelfCall`)
-        when typeof(read(e)) is void:
-          read(e)
-        else:
-          discard read(e)
 
 proc makeAsyncProcBody(prc, iterSym: NimNode, isCapture: bool): NimNode =
   let envSym = ident("env")
@@ -463,7 +407,7 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
   result = prc
   let prcName = prc.name
   let name = if prcName.kind == nnkEmpty: ":anonymous" else: $prcName
-
+  let iterPtrName = "yasync_iterPtr_" & name
   let iterSym = genSym(nskIterator, name & ":iter")
 
   var resultType = prc.params[0] or ident"void"
@@ -477,12 +421,14 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
   let body = transformReturnStmt(body1, resultSym)
   let typedProcCopy = makeTypedProcCopy(prc, body, resultType)
 
-  let namedProcRegister = makeAsyncProcRegistration(prc, iterSym, isCapture)
+  let dummySelfCall = makeDummySelfCall(prc)
   let asyncProcBody = makeAsyncProcBody(prc, iterSym, isCapture)
   let subIdent = ident"<yasyncSubstates>"
+  let iterPtrName2 = ident"iterPtrName"
   result.body = quote do:
+    const `iterPtrName2` = genIterPtrName(`iterPtrName`)
     type Substates = makeSubstates(`typedProcCopy`)
-    iterator `iterSym`() {.closure.} =
+    iterator `iterSym`() {.closure, exportc: `iterPtrName2`.} =
       var `hSym` {.noinit.}: ContHeader
       keepFromReordering(`hSym`)
       when `resultType` isnot void:
@@ -494,8 +440,21 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
         `argDefs`
       var `subIdent` {.used, inject.}: Substates
       `body`
-    `namedProcRegister`
-    `asyncProcBody`
+
+  if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
+    result.body.add quote do:
+      registerAsyncData(`dummySelfCall`, `iterPtrName2`, `iterSym`)
+      proc dummy() {.used.} =
+        # Workaround nim bug. Without this proc nim sometimes fails
+        # to instantiate waitFor code. This bug is not demonstrated
+        # in the tests.
+        var e: asyncCallEnvType(`dummySelfCall`)
+        when typeof(read(e)) is void:
+          read(e)
+        else:
+          discard read(e)
+
+  result.body.add(asyncProcBody)
 
 proc rawRetType[T](t: typedesc[Cont[T]]): ref Cont[T] = discard
 
@@ -708,8 +667,8 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
     rawProcParams = rawProcDef.params
   else:
     wrapperBody.add quote do:
-      proc getIterPtr(): ProcType {.nimcall, importc: `procPtrName`.}
-      setProc(getHeader(`pEnv`[]), getIterPtr())
+      proc iterPtr(e: pointer) {.nimcall, gcsafe, importc: `procPtrName`.}
+      setProc(getHeader(`pEnv`[]), iterPtr)
 
   for i in 1 ..< f.len:
     let argId = ident("arg" & $i)
@@ -776,7 +735,7 @@ template asyncLaunchWithEnv*(aenv: var AsyncEnv, call: FutureBase{nkCall}) =
     when procPtrName.startsWith("yasync_raw_"):
       makeRawCall(call, addr aenv.env)
     else:
-      proc getIterPtr(): ProcType {.nimcall, importc: procPtrName.}
-      getHeader(aenv.env).p = getIterPtr()
+      proc iterPtr(e: pointer) {.gcsafe, nimcall, importc: procPtrName.}
+      getHeader(aenv.env).p = iterPtr
       fillArgs(aenv.env, call)
       launch(cast[ptr ContBase](addr aenv.env))
