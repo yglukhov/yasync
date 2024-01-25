@@ -297,8 +297,7 @@ proc genIterPtrName(s: string): string {.compileTime.} =
   var i = 0
   result = s & "_" & $counter
   while i < result.len:
-    let c = result[i]
-    if c notin {'A'..'Z','a'..'z','_','0'..'9'}:
+    if result[i] notin {'A'..'Z','a'..'z','_','0'..'9'}:
       result.delete(i .. i)
     else:
       inc i
@@ -449,10 +448,7 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
         # to instantiate waitFor code. This bug is not demonstrated
         # in the tests.
         var e: asyncCallEnvType(`dummySelfCall`)
-        when typeof(read(e)) is void:
-          read(e)
-        else:
-          discard read(e)
+        discard typeof(read(e)) is void
 
   result.body.add(asyncProcBody)
 
@@ -710,10 +706,8 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
       readAux(`subs`[])
 
 template await*[T](f: ref Cont[T]): T =
-  if false:
-    discard f
-
   when compiles(checkVarDeclared(`<yasyncSubstates>`)):
+    if false: discard f
     block:
       type Env = asyncCallEnvType(f)
       when Env is void:
