@@ -25,6 +25,19 @@ proc bar(yo: string) {.async.} =
 
 waitFor bar("hi")
 
+expectOutput """
+12
+23
+13
+"""
+
+proc logThis(x = 1; y = x+1) {.async.} =
+  log x, y
+
+waitFor logThis()
+waitFor logThis(2)
+waitFor logThis(1, 3)
+
 # The following expectations are for 64 bit architectures
 when defined(gcDestructors):
   expectOutput """
