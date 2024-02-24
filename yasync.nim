@@ -197,7 +197,9 @@ iterator arguments(formalParams: NimNode): tuple[idx: int, name, typ, default: N
   for i in 1 ..< formalParams.len:
     let pp = formalParams[i]
     for j in 0 .. pp.len - 3:
-      yield (iParam, pp[j], copyNimTree(stripSinkFromArgType(pp[^2])), pp[^1])
+      var t = copyNimTree(stripSinkFromArgType(pp[^2]))
+      if t.kind == nnkEmpty: t = newCall("typeof", pp[^1])
+      yield (iParam, pp[j], t, pp[^1])
       inc iParam
 
 template keepFromReordering[T](v: T) =
