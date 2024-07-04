@@ -206,7 +206,12 @@ template keepFromReordering[T](v: T) =
   # This proc is used to make nim place iterator variables in its environment
   # in the same order they are defined in the iterator.
   # It was not needed until https://github.com/nim-lang/Nim/pull/22559
+  # It is no longer needed after https://github.com/nim-lang/Nim/pull/23787
   discard v
+
+const canLiftLocals = compiles(block:
+                                 var a {.liftLocals.}: int
+                                 a)
 
 proc sameIdent(a: NimNode, s: string): bool =
   cmpIgnoreStyle($a, s) == 0
@@ -223,8 +228,11 @@ proc makeArgDefs(prc: NimNode): NimNode =
   result.add(varSection)
   for i, n, t, d in arguments(prc.params):
     if not isGenericArgType(t):
-      varSection.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
-      result.add(newCall(bindSym"keepFromReordering", n))
+      when canLiftLocals:
+        varSection.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit", ident"liftLocals")), t))
+      else:
+        varSection.add(newIdentDefs(newTree(nnkPragmaExpr, n, newTree(nnkPragma, ident"noinit")), t))
+        result.add(newCall(bindSym"keepFromReordering", n))
 
 proc transformReturnStmt(n, resSym: NimNode): NimNode =
   result = n
@@ -430,12 +438,19 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
     const `iterPtrName2` = genIterPtrName(`iterPtrName`)
     type Substates = makeSubstates(`typedProcCopy`)
     iterator `iterSym`() {.closure, exportc: `iterPtrName2`.} =
-      var `hSym` {.noinit.}: ContHeader
-      keepFromReordering(`hSym`)
+      when canLiftLocals:
+        var `hSym` {.noinit, liftLocals.}: ContHeader
+      else:
+        var `hSym` {.noinit.}: ContHeader
+        keepFromReordering(`hSym`)
+
       when `resultType` isnot void:
         {.push warning[ResultShadowed]: off.}
-        var `resultSym`: `resultType`
-        keepFromReordering(`resultSym`)
+        when canLiftLocals:
+          var `resultSym` {.liftLocals.}: `resultType`
+        else:
+          var `resultSym`: `resultType`
+          keepFromReordering(`resultSym`)
         {.pop.}
       when not `isCapture`:
         `argDefs`
