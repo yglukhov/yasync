@@ -76,3 +76,47 @@ block:
     log 2
 
   waitFor cb(5)
+
+block:
+  expectOutput """
+  new 1
+  new 2
+  1
+  destroy 1
+  b 2
+  2
+  destroy 2
+  """
+
+  type
+    SmartPtr = object
+      o: int
+
+  proc newId(): int =
+    var g {.global.} = 0
+    inc g
+    log "new ", g
+    g
+
+  proc `=destroy`(o: var SmartPtr) =
+    if o.o != 0:
+      log "destroy ", o.o
+      o.o = 0
+
+  proc `=copy`(a: var SmartPtr, b: SmartPtr) =
+    if a.o != 0:
+      log "delete ", a.o
+    if b.o == 0:
+      a.o = 0
+    else:
+      a.o = newId()
+
+  proc foo() {.async.} =
+    let a = SmartPtr(o: newId())
+    var b = SmartPtr(o: newId())
+    log 1
+    await sleep(1)
+    log "b ", b.o
+    log 2
+
+  waitFor foo()
