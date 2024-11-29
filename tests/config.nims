@@ -10,6 +10,3 @@ switch("path", "$projectDir/..")
 
 # --d:danger
 # --d:release
-
-# XXX: This is required after https://github.com/nim-lang/Nim/pull/24108, must be fixed in nim
---d:nimOptIters
