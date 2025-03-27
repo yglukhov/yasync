@@ -153,17 +153,13 @@ proc checkFinished(resFut: ptr ContBase) {.stackTrace: off.} =
 
 proc read[T](resFut: Cont[T]): T =
   checkFinished(addr resFut)
-  resFut.result
-
-proc read(resFut: Cont[void]) =
-  checkFinished(addr resFut)
+  when T isnot void:
+    return resFut.result
 
 proc read*[T](resFut: Future[T]): T =
   checkFinished(cast[ptr ContBase](resFut))
-  resFut.result
-
-proc read*(resFut: Future[void]) =
-  checkFinished(cast[ptr ContBase](resFut))
+  when T isnot void:
+    return resFut.result
 
 proc readAux[T](a: T): auto {.inline.} =
   when compiles(a.result2):
@@ -506,7 +502,7 @@ macro asyncRaw*(prc: untyped{nkProcDef}): untyped =
   ##   echo "Computation complete. Adding the number now..."
   ##   env.complete(env.someNumber + computationResult)
   ##
-  ## proc myEfficientComputationPlusSomeNumber(someNumber: int, env: ptr AllocationFreeEnv) =
+  ## proc myEfficientComputationPlusSomeNumber(someNumber: int, env: ptr AllocationFreeEnv) {.asyncRaw.} =
   ##   env.someNumber = someNumber
   ##   startSomeComputationApi(env, cast[proc(c: pointer) {.cdecl.}](myCallback))
   ##

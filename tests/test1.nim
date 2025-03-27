@@ -116,3 +116,23 @@ proc rawProc1(a: float, env: ptr Cont[float]) {.asyncRaw.} =
   env.complete(a * 2)
 
 log waitFor rawProc1 5
+
+expectOutput """
+4
+"""
+
+type
+  DoubleEnv = object of Cont[int]
+    sth: int
+
+proc doubleImpl(val: int, env: ptr DoubleEnv) {.asyncRaw.} =
+  complete(env, val * 2)
+
+proc double(val: int): int {.async.} =
+  await doubleImpl(val)
+
+proc foo1() {.async.} =
+  let val = await double(2)
+  log val
+
+waitFor foo1()
