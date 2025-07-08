@@ -496,15 +496,16 @@ macro asyncRaw*(prc: untyped{nkProcDef}): untyped =
   ## type AllocationFreeEnv = object of Cont[int]
   ##   someNumber: int
   ##
-  ## proc startSomeComputation(context: pointer, callback: proc(c: pointer) {.cdecl.})
+  ## proc startSomeComputation(context: pointer, callback: proc(calcResult: int, context: pointer) {.cdecl.})
   ##
-  ## proc myCallback(computationResult: int, env: ptr AllocationFreeEnv) {.cdecl.} =
+  ## proc myCallback(computationResult: int, context: pointer) {.cdecl.} =
   ##   echo "Computation complete. Adding the number now..."
+  ##   let env = cast[ptr AllocationFreeEnv](context)
   ##   env.complete(env.someNumber + computationResult)
   ##
   ## proc myEfficientComputationPlusSomeNumber(someNumber: int, env: ptr AllocationFreeEnv) {.asyncRaw.} =
   ##   env.someNumber = someNumber
-  ##   startSomeComputationApi(env, cast[proc(c: pointer) {.cdecl.}](myCallback))
+  ##   startSomeComputationApi(env, myCallback)
   ##
   ## # Works as if it was `proc myEfficientComputationPlusSomeNumber(someNumber: int): int {.async.}`
   ## echo waitFor myEfficientComputationPlusSomeNumber(5)
