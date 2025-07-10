@@ -35,7 +35,7 @@ proc recv[T](c: var Channel[T], env: ptr Cont[T]) {.asyncRaw.} =
 var channel1 = Channel[int]()
 var channel2 = Channel[int]()
 
-proc filterProcess(filter: proc(a: int): int {.nimcall.}) {.async.} =
+proc filterProcess(filter: proc(a: int): int) {.async.} =
   while true:
     await send(channel2, filter(await recv(channel1)))
 
@@ -58,7 +58,7 @@ proc receiverProcess() {.async.} =
   log "Receiver done"
   receiverDone = true
 
-proc filter(a: int): int {.nimcall.} = a * 2
+proc filter(a: int): int = a * 2
 
 # Launch all the 3 tasks. We could do just `discard senderProcess()`
 # but to prevent heap allocation, let's keep their envs in static memory.

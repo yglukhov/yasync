@@ -5,7 +5,7 @@
 **Requires nim devel or 2.0.**
 
 - Semantics is very close to that of Nim's std `async`, `await` and `Future[T]`.
-- `await` operation doesn't cause any heap allocations (except calling manually-async functions, async closures, and (mutually) recursive calls).
+- `await` operation doesn't cause any heap allocations (except async closures, and (mutually) recursive async calls).
 - `callSoon` is not used and async code is guaranteed to run atomically between `await`s across call boundaries (TODO: maybe add an example)
 - Function return type is written as `T`, then `async` transforms it to `Future[T]` implicitly.
 - Provides optional compatibility layer for interop with existing `asyncdispatch` (and TODO: chronos) code. [Example](https://github.com/yglukhov/yasync/blob/main/tests/test4.nim). The library itself is completely dispatcher agnostic, and doesn't depend on neither `asyncdispatch`, nor chronos.
