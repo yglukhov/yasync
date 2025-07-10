@@ -41,8 +41,6 @@ template waitFor*[T](f: Future[T]): T =
     when Env is void:
       waitForAux(f)
     else:
-      if false:
-        discard f
       var e: Env
       asyncLaunchWithEnv(e, f)
       while not e.finished:

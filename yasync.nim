@@ -626,20 +626,14 @@ macro makeRawCall(call: typed, env: typed): untyped =
   let d = asyncData[call[0]]
   assert(d.procPtrName.startsWith("yasync_raw_"))
 
-  let typ = getType(call[0])
+  let typ = getTypeImpl(call[0])[0]
   let prc = newProc(ident"inner")
   let prms = newTree(nnkFormalParams, ident"void")
   let innerCall = newCall("inner")
-  for i in 2 ..< typ.len:
-    # Instead of using arg type from `typ`, we're defining argTyp as typeof(arg)
-    # This may seem unsafe because implicit conversions might not be applied,
-    # but it appears to be safe, even though treeRepr(result) doesn't show that.
-    # This is likely because the arguments have already passed semantic phase,
-    # gained their types and it's not going to change. There's a test for this
-    # in test1.nim (grep asyncRaw implicit conversions).
-    let argTyp = newCall("typeof", call[i - 1])
-    prms.add(newIdentDefs(ident("arg" & $i ), argTyp))
-    innerCall.add(call[i - 1])
+
+  for i, _, t, d in arguments(typ):
+    prms.add(newIdentDefs(ident("arg" & $i ), t))
+    innerCall.add(call[i + 1])
 
   prms.add(newIdentDefs(ident"env", newCall("typeof", env)))
   innerCall.add(env)
@@ -668,6 +662,7 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
   let wrapperBody = wrapperDef.body
   let isRaw = procPtrName.startsWith("yasync_raw_")
   var rawProcDef, rawProcCall, rawProcParams: NimNode
+  let callTyp = getTypeImpl(f[0])[0]
 
   if isRaw:
     let rawProc = genSym(nskProc, "rawProc")
@@ -680,15 +675,15 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
       proc iterPtr(e: pointer) {.nimcall, gcsafe, importc: `procPtrName`.}
       setProc(getHeader(`pEnv`[]), iterPtr)
 
-  for i in 1 ..< f.len:
+  for i, _, t, d in arguments(callTyp):
     let argId = ident("arg" & $i)
-    wrapperParams.add newIdentDefs(argId, newCall("typeof", f[i]))
-    wrapperCall.add(f[i])
+    wrapperParams.add newIdentDefs(argId, t)
+    wrapperCall.add(f[i + 1])
     if isRaw:
-      rawProcParams.add newIdentDefs(argId, newCall("typeof", argId))
+      rawProcParams.add newIdentDefs(argId, t)
       rawProcCall.add(argId)
     else:
-      wrapperBody.add(newCall(bindSym"fillArgPtr", pEnv, newLit(i - 1), argId))
+      wrapperBody.add(newCall(bindSym"fillArgPtr", pEnv, newLit(i), argId))
 
   if isRaw:
     rawProcParams.add newIdentDefs(ident"env", newCall("typeof", `subs`))
@@ -739,6 +734,8 @@ template await*[T](f: ref Cont[T]): T =
 
 template asyncLaunchWithEnv*(aenv: var AsyncEnv, call: FutureBase{nkCall}) =
   block:
+    if false:
+      discard call
     const procPtrName = asyncCallProcPtrName(call)
     when procPtrName.startsWith("yasync_raw_"):
       makeRawCall(call, addr aenv.env)
