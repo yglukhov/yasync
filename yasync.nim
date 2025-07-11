@@ -9,16 +9,14 @@ type
     p: ProcType
     e: ptr ContBase
     error: ref Exception
-    flags: set[ContFlags]
+    flags: pointer # used for ContFlags, and Substates offset
 
   ContBase = object of RootObj
     `<state_reserved>`: int
     h: ContHeader
 
   Cont*[T] = object of ContBase
-    when T is void:
-      discard
-    else:
+    when T isnot void:
       result*: T
 
   FutureBase* = ref ContBase
@@ -27,6 +25,8 @@ type
   AsyncEnv*[T] = object
     env*: T
 
+  CancelError* = object of CatchableError
+
 {.pragma: silent, inline, stackTrace: off, lineTrace: off.}
 
 proc finished(f: ContBase): bool {.inline.} = f.`<state_reserved>` < 0
@@ -34,20 +34,38 @@ proc finished(f: ptr ContBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished*(f: FutureBase): bool {.inline.} = f.`<state_reserved>` < 0
 proc finished*(f: AsyncEnv): bool {.inline.} = finished(cast[ptr ContBase](addr f))
 
+proc getSubstatesOffset(h: ContHeader): uint {.silent.} =
+  cast[uint](h.flags) shr 1
+
+proc setSubstatesOffset(h: var ContHeader, retType, substates: typedesc) {.silent.} =
+  # Task offset in bytes = addr(Substates) - addr(ContHeader)
+  assert(getSubstatesOffset(h) == 0, "yasync internal error")
+  type ReferenceStruct = object
+    h: ContHeader
+    when retType isnot void:
+      r: retType
+    s: substates
+  const o = offsetof(ReferenceStruct, s).uint
+  h.flags = cast[pointer](cast[uint](h.flags) or (o shl 1))
+
 proc newFuture*(T: typedesc): Future[T] =
   result.new()
 
-proc markAllocatedEnv(e: ptr ContBase) {.inline.} =
-  e.h.flags.incl(fAllocated)
+proc markAllocatedEnv(h: var ContHeader) {.silent.} =
+  const flag = uint(1 shl ord(fAllocated))
+  h.flags = cast[pointer](cast[uint](h.flags) or flag)
 
-proc isAllocatedEnv(e: ptr ContBase): bool {.inline.} =
-  e.h.flags.contains(fAllocated)
+proc isAllocatedEnv(h: ContHeader): bool {.silent.} =
+  const flag = uint(1 shl ord(fAllocated))
+  (cast[uint](h.flags) and flag) != 0
+
+proc markAllocatedEnv(e: ptr ContBase) {.silent.} = markAllocatedEnv(e.h)
+proc isAllocatedEnv(e: ptr ContBase): bool {.silent.} = isAllocatedEnv(e.h)
 
 template setStateFinished[T](a: T) =
   a.`<state_reserved>` = -1
 
 proc resume(p: ptr ContBase) =
-  {.push warning[BareExcept]: off.}
   var p = p
   while not p.isNil:
     if p.finished:
@@ -70,7 +88,6 @@ proc resume(p: ptr ContBase) =
         p.h.error = e
       if not p.finished:
         break
-  {.pop.}
 
 proc launch(p: ptr ContBase) {.silent.} =
   p.h.p(p)
@@ -99,10 +116,10 @@ proc fail*(resFut: ptr ContBase, err: ref Exception) =
   resFut.h.error = err
   resume(resFut)
 
-proc fail*(resFut: ref ContBase, err: ref Exception) {.inline.} =
+proc fail*(resFut: FutureBase, err: ref Exception) {.inline.} =
   fail(cast[ptr ContBase](resFut), err)
 
-proc error*(f: ref ContBase): ref Exception {.inline.} = f.h.error
+proc error*(f: FutureBase): ref Exception {.inline.} = f.h.error
 
 type
   CB[T] = ref object of ContBase
@@ -130,7 +147,7 @@ proc then*[T](f: Future[T], cb: proc(v: T, error: ref Exception) {.gcsafe.}) =
     cb(f.result, f.h.error)
   else:
     let c = CB[T](f: f, cb: cb)
-    c.h.flags.incl fAllocated
+    markAllocatedEnv(c.h)
     GC_ref(c)
     c.h.p = onComplete[T]
     f.h.e = cast[ptr ContBase](c)
@@ -141,7 +158,7 @@ proc then*(f: Future[void], cb: proc(error: ref Exception) {.gcsafe.}) =
     cb(f.h.error)
   else:
     let c = CBVoid(f: f, cb: cb)
-    c.h.flags.incl fAllocated
+    markAllocatedEnv(c.h)
     GC_ref(c)
     c.h.p = onComplete[void]
     f.h.e = cast[ptr ContBase](c)
@@ -170,6 +187,53 @@ proc readAux[T](a: T): auto {.inline.} =
 proc read*(resFut: AsyncEnv): auto =
   checkFinished(cast[ptr ContBase](addr resFut))
   readAux(resFut.env)
+
+proc setCancelCb*[T: Cont](p: ptr T, cb: proc(p: ptr T) {.nimcall.}) {.silent.} =
+  p.h.p = cast[ProcType](cb)
+
+proc raiseCancelError(c: ptr ContBase) =
+  c.fail(newException(CancelError, ""))
+
+proc cancel(c: ptr ContBase) =
+  type
+    DummySubstates = object
+      case sub: uint8
+      of 0:
+        tmpFut: FutureBase
+      of 1:
+        sub1: ContBase
+      else:
+        discard
+
+  var c = c
+  while true:
+    let o = getSubstatesOffset(c.h)
+    if o == 0:
+      let cancelProc = c.h.p
+      if not cancelProc.isNil:
+        c.h.p = nil
+        cancelProc(c)
+
+      raiseCancelError(c)
+      break
+    else:
+      let subs = cast[ptr DummySubstates](cast[uint](c) + o + offsetof(ContBase, h).uint)
+      let state = subs.sub
+      if state == 0:
+        let pFut = cast[ptr FutureBase](cast[uint](subs) + offsetof(DummySubstates, tmpFut).uint)
+        let fut = cast[ptr ContBase](pFut[])
+        if fut.isNil:
+          raiseCancelError(c)
+          break
+        c = cast[ptr ContBase](fut)
+      else:
+        c = cast[ptr ContBase](cast[uint](subs) + offsetof(DummySubstates, sub1).uint)
+
+proc cancel*(f: FutureBase) {.silent.} =
+  cancel(cast[ptr ContBase](f))
+
+proc cancel*(e: var AsyncEnv) {.silent.} =
+  cancel(cast[ptr ContBase](addr e))
 
 template thisEnv(a: var ContHeader): ptr ContBase =
   cast[ptr ContBase](cast[int](addr(a)) - sizeof(int) * 2)
@@ -247,7 +311,7 @@ macro argFieldAccess(o: typed, idx: static[int]): untyped =
   let t = getType(o)
   t.expectKind(nnkObjectTy)
   let rl = t[2]
-  var idx = idx + 2
+  var idx = idx + 3
   if $rl[2] == "result2": inc idx
   result = newDotExpr(o, rl[idx])
 
@@ -367,7 +431,7 @@ proc makeTypedProcCopy(prc, body, resultType: NimNode): NimNode =
   let bd = quote do:
     when `resultType` isnot void:
       {.push warning[ResultShadowed]: off.}
-      var result: `resultType`
+      var result {.used.}: `resultType`
       {.pop.}
     var `asyncTypedProcMarker` {.used, inject.}: int
     `body`
@@ -443,14 +507,22 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
       when `resultType` isnot void:
         {.push warning[ResultShadowed]: off.}
         when canLiftLocals:
-          var `resultSym` {.liftLocals.}: `resultType`
+          var `resultSym` {.used, liftLocals.}: `resultType`
         else:
-          var `resultSym`: `resultType`
+          var `resultSym` {.used.}: `resultType`
           keepFromReordering(`resultSym`)
         {.pop.}
+      when canLiftLocals:
+        var `subIdent` {.noinit, used, inject, liftLocals.}: Substates
+      else:
+        var `subIdent` {.noinit, used, inject.}: Substates
+        keepFromReordering(`subIdent`)
+
+      setSubstatesOffset(`hSym`, `resultType`, Substates)
+
       when not `isCapture`:
         `argDefs`
-      var `subIdent` {.used, inject.}: Substates
+
       `body`
 
   if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
@@ -465,7 +537,7 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
 
   result.body.add(asyncProcBody)
 
-proc rawRetType[T](t: typedesc[Cont[T]]): ref Cont[T] = discard
+proc rawRetType[T](t: typedesc[Cont[T]]): Future[T] = discard
 
 macro asyncRaw*(prc: untyped{nkProcDef}): untyped =
   ## used to define a low-level async procedure
@@ -714,7 +786,7 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
       checkFinished(cast[ptr ContBase](`subs`))
       readAux(`subs`[])
 
-template await*[T](f: ref Cont[T]): T =
+template await*[T](f: Future[T]): T =
   when compiles(checkVarDeclared(`<yasyncSubstates>`)):
     if false: discard f
     block:

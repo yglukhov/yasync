@@ -8,6 +8,7 @@
 - `await` operation doesn't cause any heap allocations (except async closures, and (mutually) recursive async calls).
 - `callSoon` is not used and async code is guaranteed to run atomically between `await`s across call boundaries (TODO: maybe add an example)
 - Function return type is written as `T`, then `async` transforms it to `Future[T]` implicitly.
+- Supports cancellation of async tasks, with optional cancellation callbacks in terminal futures.
 - Provides optional compatibility layer for interop with existing `asyncdispatch` (and TODO: chronos) code. [Example](https://github.com/yglukhov/yasync/blob/main/tests/test4.nim). The library itself is completely dispatcher agnostic, and doesn't depend on neither `asyncdispatch`, nor chronos.
 
 This library introduces `async`, `await` and `Future[T]` similar in semantics to Nim's native ones, but implements an optimization to avoid heap allocations. Consider the following sample:
@@ -33,7 +34,4 @@ If we pretend that `sleep` doesn't allocate, the whole `waitFor` operation above
 TODO: Describe how it works in details
 
 TODO:
-- [x] Recursive calls
-- [x] Generics
-- [ ] Cancellation
 - [ ] Nice stack traces
