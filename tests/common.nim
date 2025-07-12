@@ -1,7 +1,32 @@
 import std/[exitprocs, strutils]
 import yasync
 from yasync/compat import waitFor
-from asyncdispatch import nil
+
+const asyncBackend {.strdefine.} = ""
+const useChronosBackend* = asyncBackend == "chronos"
+when useChronosBackend:
+  from chronos import nil
+  proc sleepRaw*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
+    chronos.addCallback(chronos.sleepAsync(ms)) do(p: pointer):
+      env.complete()
+
+  proc sleep*(ms: int): Future[void] =
+    result.new()
+    let res = result
+    chronos.addCallback(chronos.sleepAsync(ms)) do(p: pointer):
+      res.complete()
+
+else:
+  from asyncdispatch import nil
+  proc sleepRaw*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
+    asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
+      env.complete()
+
+  proc sleep*(ms: int): Future[void] =
+    result.new()
+    let res = result
+    asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
+      res.complete()
 
 export waitFor
 
@@ -32,16 +57,6 @@ proc expectOutput*(v: string) =
 addExitProc do():
   checkOutput()
   echo "OK"
-
-proc sleepRaw*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
-  asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
-    env.complete()
-
-proc sleep*(ms: int): Future[void] =
-  result.new()
-  let res = result
-  asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
-    res.complete()
 
 proc sleep2*(ms: int) {.async.} =
   await sleep(ms div 2)

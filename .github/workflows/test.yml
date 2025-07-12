@@ -29,4 +29,5 @@ jobs:
       shell: bash
       run: |
         nim --version
+        nimble install chronos
         nimble test

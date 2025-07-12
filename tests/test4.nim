@@ -1,9 +1,13 @@
 # asyncdispatch compatibility
 
-from asyncdispatch import waitFor, sleepAsync
+from ./common import log, expectOutput, useChronosBackend
+when useChronosBackend:
+  from chronos import sleepAsync
+else:
+  from asyncdispatch import sleepAsync
+
 import yasync
 import yasync/compat
-from ./common import log, expectOutput
 
 expectOutput """
 hi
@@ -26,7 +30,10 @@ bye
 1
 """
 
-log asyncdispatch.waitFor foo().toCompat()
+when useChronosBackend:
+  log chronos.waitFor foo().toCompat()
+else:
+  log asyncdispatch.waitFor foo().toCompat()
 
 proc fooVoid() {.async.} =
   log 1
@@ -38,7 +45,10 @@ expectOutput """
 2
 """
 
-asyncdispatch.waitFor fooVoid().toCompat()
+when useChronosBackend:
+  chronos.waitFor fooVoid().toCompat()
+else:
+  asyncdispatch.waitFor fooVoid().toCompat()
 
 import asyncdispatch_functions
 

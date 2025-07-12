@@ -1,4 +1,8 @@
-import asyncdispatch
+from ./common import useChronosBackend
+when useChronosBackend:
+  import chronos
+else:
+  import asyncdispatch
 
 type
   Response* = object
