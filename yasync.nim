@@ -445,7 +445,7 @@ proc makeTypedProcCopy(prc, body, resultType: NimNode): NimNode =
                    newEmptyNode(),
                    newEmptyNode(),
                    newEmptyNode(),
-                   copyNimTree(prc.params),
+                   params,
                    newEmptyNode(),
                    newEmptyNode(),
                    bd)

@@ -86,3 +86,18 @@ proc foo1() {.async.} =
   log await genericRaw1(OOO[int](m: 5))
 
 waitFor foo1()
+
+
+expectOutput """
+1
+1
+0
+"""
+proc foo2() {.async.} =
+  log 1
+
+proc generic4(a: typedesc, b, c: float): a {.async.} =
+  await foo2()
+  await foo2()
+
+log waitFor generic4(int, 4, 5)
