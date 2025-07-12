@@ -1,9 +1,8 @@
 import yasync
-from strutils import join
 
-proc log(s: varargs[string, `$`]) =
+template log(s: varargs[untyped]) =
   when false:
-    echo s.join(" ")
+    echo s
 
 type
   Channel[T] = object
