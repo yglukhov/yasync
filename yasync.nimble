@@ -49,7 +49,10 @@ task test, "Run tests":
     if sf.ext == ".nim" and sf.name.startsWith("t"):
       for args in cartesianProduct(
           @["c", "cpp"],
+          # @["c"],
           @["--mm:refc", "--mm:orc"],
+          # @["--mm:orc"],
           @["-d:asyncBackend=asyncdispatch", "-d:asyncBackend=chronos"]):
+          # @["-d:asyncBackend=asyncdispatch"]):
         echo "RUNNING TEST: nim " & args.join(" ") & " " & f.path
         exec "nim " & args.join(" ") & " " & f.path

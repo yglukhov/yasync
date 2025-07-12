@@ -178,8 +178,10 @@ proc read*[T](resFut: Future[T]): T =
   when T isnot void:
     return resFut.result
 
-proc readAux[T](a: T): auto {.inline.} =
-  when compiles(a.result2):
+proc readAux[T](a: T): auto {.silent.} =
+  when T is Cont and compiles(a.result):
+    a.result
+  elif compiles(a.result2):
     a.result2
   else:
     discard
@@ -242,6 +244,7 @@ type
   AsyncProcData = object
     procPtrName: string # C Symbol of proc ptr
     envType: NimNode
+    optimizable: bool # if async proc doesn't have unoptimizable awaits
 
 proc hash(n: NimNode): Hash = hash($n)
 var asyncData {.compileTime.} = initTable[NimNode, AsyncProcData]()
@@ -337,6 +340,9 @@ macro getClosureEnvType(a: typed): untyped =
 macro registerAsyncData(dummyCall: typed, procPtrName: static[string], iterSym: typed): untyped =
   asyncData[dummyCall[0]] = AsyncProcData(envType: newCall(bindSym"getClosureEnvType", iterSym), procPtrName: procPtrName)
 
+macro registerAsyncOptimizedData(dummyCall: typed, procPtrName: static[string], iterSym: typed, envType: typed): untyped =
+  asyncData[dummyCall[0]] = AsyncProcData(envType: envType, procPtrName: procPtrName, optimizable: true)
+
 macro registerAsyncRawData(dummyCall: typed, procPtrName: static[string], envType: typed): untyped =
   asyncData[dummyCall[0]] = AsyncProcData(envType: envType, procPtrName: procPtrName)
 
@@ -358,6 +364,9 @@ proc asyncCallProcPtrNameAux(call: NimNode): string =
 
 macro asyncCallProcPtrName(call: Future): untyped =
   newLit(asyncCallProcPtrNameAux(call))
+
+macro asyncCallOptimizable(call: Future): untyped =
+  newLit(asyncData[call[0]].optimizable)
 
 template setProc(h: ptr ContHeader, prc: ProcType) = h.p = prc
 
@@ -450,27 +459,52 @@ proc makeTypedProcCopy(prc, body, resultType: NimNode): NimNode =
                    newEmptyNode(),
                    bd)
 
-proc collectSubstate(n, stateObj: NimNode) =
+proc initStateRecList(stateRecList: NimNode) =
+  if stateRecList.len == 0:
+    let objStateRecCase = newTree(nnkRecCase, newIdentDefs(ident"sub", ident"uint8"))
+    objStateRecCase.add newTree(nnkOfBranch, newLit(0), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
+    stateRecList.add(objStateRecCase)
+
+proc collectSubstate(n, stateRecList: NimNode) =
   if n.kind == nnkCall and n[0].kind == nnkSym:
     let data = asyncData.getOrDefault(n[0])
-    if data.envType != nil:
-      let i = stateObj.len - 1
-      let subId = ident("sub" & $i)
-      stateObj.add newTree(nnkOfBranch, newLit(i), newIdentDefs(subId, data.envType))
+    if not data.optimizable:
+      initStateRecList(stateRecList)
 
-proc processSubstates(n, stateObj: NimNode) =
+      if data.envType != nil:
+        let recCase = stateRecList[^1]
+        let i = recCase.len - 1
+        let subId = ident("sub" & $i)
+        recCase.add newTree(nnkOfBranch, newLit(i), newIdentDefs(subId, data.envType))
+  else:
+    initStateRecList(stateRecList)
+
+proc processSubstates(n, stateRecList: NimNode) =
   for i in 0 ..< n.len:
-    processSubstates(n[i], stateObj)
+    processSubstates(n[i], stateRecList)
 
   if n.kind == nnkCall and n[0].kind == nnkSym and $n[0] == "dummyAwaitMarkerMagic":
-    collectSubstate(n[1], stateObj)
+    collectSubstate(n[1], stateRecList)
 
 macro makeSubstates(a: typed): untyped =
-  let objStateRecCase = newTree(nnkRecCase, newIdentDefs(ident"sub", ident"uint8"))
-  objStateRecCase.add newTree(nnkOfBranch, newLit(0), newIdentDefs(ident"tmpFut", bindSym"FutureBase"))
-  processSubstates(a.body, objStateRecCase)
-  objStateRecCase.add newTree(nnkElse, newNilLit())
-  result = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList, objStateRecCase))
+  let objStateRecList = newNimNode(nnkRecList)
+  processSubstates(a.body, objStateRecList)
+  if objStateRecList.len != 0:
+    let recCase = objStateRecList[^1]
+    recCase.add newTree(nnkElse, newNilLit())
+  result = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), objStateRecList)
+
+template newCompletedFuture[T](v: T): Future[T] =
+  let f = newFuture(T)
+  try:
+    when T is void:
+      v
+      f.complete()
+    else:
+      f.complete(v)
+  except Exception as e:
+    f.fail(e)
+  f
 
 proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
   result = prc
@@ -478,8 +512,27 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
   let name = if prcName.kind == nnkEmpty: ":anonymous" else: $prcName
   let iterPtrName = "yasync_iterPtr_" & name
   let iterSym = genSym(nskIterator, name & ":iter")
+  let subIdent = ident"<yasyncSubstates>"
+  let optimizedProcSym = genSym(nskProc, name & ":real")
+  let optimizedProcDef = copyNimTree(prc)
+  optimizedProcDef.name = optimizedProcSym
 
-  var resultType = prc.params[0] or ident"void"
+  block:
+    # insert <yasyncSubstates> marker to optimized proc
+    let b = optimizedProcDef.body
+    optimizedProcDef.body = quote do:
+      var `subIdent` {.inject, used.}: byte
+      `b`
+
+  let optimizedParams = newTree(nnkFormalParams, prc.params[0])
+  let optimizedCall = newTree(nnkCall, optimizedProcSym)
+  optimizedProcDef.params = optimizedParams
+  for i, n, t, d in arguments(prc.params):
+    if not isGenericArgType(t):
+      optimizedParams.add(newIdentDefs(n, t))
+      optimizedCall.add(n)
+
+  let resultType = prc.params[0] or ident"void"
   prc.params[0] = newTree(nnkBracketExpr, bindSym"Future", resultType)
 
   let hSym = ident"<h>"
@@ -492,42 +545,55 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
 
   let dummySelfCall = makeDummySelfCall(prc)
   let asyncProcBody = makeAsyncProcBody(prc, iterSym, isCapture)
-  let subIdent = ident"<yasyncSubstates>"
   let iterPtrName2 = ident"iterPtrName"
+  optimizedProcDef.addPragma(ident"nimcall")
+  optimizedProcDef.addPragma(newTree(nnkExprColonExpr, ident"exportc", iterPtrName2))
+
+  let enableRegistration = prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture
   result.body = quote do:
     const `iterPtrName2` = genIterPtrName(`iterPtrName`)
     type Substates = makeSubstates(`typedProcCopy`)
-    iterator `iterSym`() {.closure, exportc: `iterPtrName2`.} =
-      when canLiftLocals:
-        var `hSym` {.noinit, liftLocals.}: ContHeader
-      else:
-        var `hSym` {.noinit.}: ContHeader
-        keepFromReordering(`hSym`)
-
-      when `resultType` isnot void:
-        {.push warning[ResultShadowed]: off.}
+    # If there are no meaningful yields Substates size reflects that,
+    # and we don't need to convert this func to iterator
+    const optimizable = sizeof(Substates) <= sizeof(pointer)
+    when optimizable:
+      `optimizedProcDef`
+    else:
+      iterator `iterSym`() {.closure, exportc: `iterPtrName2`.} =
         when canLiftLocals:
-          var `resultSym` {.used, liftLocals.}: `resultType`
+          var `hSym` {.noinit, liftLocals.}: ContHeader
         else:
-          var `resultSym` {.used.}: `resultType`
-          keepFromReordering(`resultSym`)
-        {.pop.}
-      when canLiftLocals:
-        var `subIdent` {.noinit, used, inject, liftLocals.}: Substates
+          var `hSym` {.noinit.}: ContHeader
+          keepFromReordering(`hSym`)
+
+        when `resultType` isnot void:
+          {.push warning[ResultShadowed]: off.}
+          when canLiftLocals:
+            var `resultSym` {.used, liftLocals.}: `resultType`
+          else:
+            var `resultSym` {.used.}: `resultType`
+            keepFromReordering(`resultSym`)
+          {.pop.}
+        when canLiftLocals:
+          var `subIdent` {.noinit, used, inject, liftLocals.}: Substates
+        else:
+          var `subIdent` {.noinit, used, inject.}: Substates
+          keepFromReordering(`subIdent`)
+
+        setSubstatesOffset(`hSym`, `resultType`, Substates)
+
+        when not `isCapture`:
+          `argDefs`
+
+        `body`
+
+    when `enableRegistration`:
+# if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
+#   result.body.add quote do:
+      when optimizable:
+        registerAsyncOptimizedData(`dummySelfCall`, `iterPtrName2`, `optimizedProcSym`, Cont[`resultType`])
       else:
-        var `subIdent` {.noinit, used, inject.}: Substates
-        keepFromReordering(`subIdent`)
-
-      setSubstatesOffset(`hSym`, `resultType`, Substates)
-
-      when not `isCapture`:
-        `argDefs`
-
-      `body`
-
-  if prc.kind in {nnkProcDef, nnkMethodDef} and not isCapture:
-    result.body.add quote do:
-      registerAsyncData(`dummySelfCall`, `iterPtrName2`, `iterSym`)
+        registerAsyncData(`dummySelfCall`, `iterPtrName2`, `iterSym`)
       proc dummy() {.used.} =
         # Workaround nim bug. Without this proc nim sometimes fails
         # to instantiate waitFor code. This bug is not demonstrated
@@ -535,7 +601,10 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
         var e: asyncCallEnvType(`dummySelfCall`)
         discard typeof(read(e)) is void
 
-  result.body.add(asyncProcBody)
+    when optimizable:
+      newCompletedFuture(`optimizedCall`)
+    else:
+      `asyncProcBody`
 
 proc rawRetType[T](t: typedesc[Cont[T]]): Future[T] = discard
 
@@ -643,8 +712,6 @@ macro asyncClosureExperimental*(prc: untyped): untyped =
 
 macro getStateIdxAux(substates: object, state: typedesc): untyped =
   let recCase = getType(substates)[2][0]
-  # echo "SUB: ", treeRepr(recCase)
-  # echo "STATE: ", getType(state).treeRepr
   for i in 2 ..< recCase.len - 1:
     let s = recCase[i][1]
     let t = getType(s)
@@ -717,26 +784,69 @@ macro makeRawCall(call: typed, env: typed): untyped =
       `prc`
       `innerCall`
 
+template futureValueType(f: untyped): typedesc = typeof(read((var v: f; v)))
+
+macro makeOptimizableCall(call: typed, env: typed): untyped =
+  let d = asyncData[call[0]]
+
+  let typ = getTypeImpl(call[0])[0]
+  let prc = newProc(ident"optimized", body = newEmptyNode())
+  let retTyp = newCall(bindSym"typeof", newCall(bindSym"read", env))# newCall("type", callTyp[0]))
+  let prms = newTree(nnkFormalParams, retTyp)
+  let innerCall = newCall("optimized")
+
+  for i, _, t, d in arguments(typ):
+    if not isGenericArgType(t):
+      prms.add(newIdentDefs(ident("arg" & $i ), t))
+      innerCall.add(call[i + 1])
+
+  # prms.add(newIdentDefs(ident"env", newCall("typeof", env)))
+  # innerCall.add(env)
+  prc.params = prms
+  prc.addPragma(ident"nimcall")
+  prc.addPragma(newTree(nnkExprColonExpr, ident"importc", newLit(d.procPtrName)))
+  let name = newLit(d.procPtrName)
+  result = quote do:
+      `prc`
+      try:
+        when `env` is Cont[void]:
+          `innerCall`
+          complete(addr `env`)
+        else:
+          complete(addr `env`, `innerCall`)
+      except Exception as e:
+        fail(addr `env`, e)
+
 macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: untyped): untyped =
   let procPtrName = asyncCallProcPtrNameAux(f)
+  let isOptimized = asyncData[f[0]].optimizable
   let setupEnv = genSym(nskProc, "setupEnv")
   let stateIdx = ident"stateIdx"
   let pEnv = ident"pEnv"
   let subs = ident"subs"
 
-  let wrapperDef = quote do:
-    proc `setupEnv`(substates: var object) {.stacktrace: off, inline.} =
-      substates.resetSubstate(`stateIdx`)
-      let `pEnv` = substateAtIndex(substates, `stateIdx`)
+  var wrapperDef: NimNode
+  var wrapperCall: NimNode
 
-  let wrapperCall = newCall(setupEnv, substates)
+  if not isOptimized:
+    wrapperDef = quote do:
+      proc `setupEnv`(substates: var object) {.stacktrace: off, inline.} =
+        substates.resetSubstate(`stateIdx`)
+        let `pEnv` = substateAtIndex(substates, `stateIdx`)
+    wrapperCall = newCall(setupEnv, substates)
+  else:
+    wrapperDef = quote do:
+      proc `setupEnv`() {.stacktrace: off, inline.} =
+        discard
+    wrapperCall = newCall(setupEnv)
+
   let wrapperParams = wrapperDef.params
   let wrapperBody = wrapperDef.body
   let isRaw = procPtrName.startsWith("yasync_raw_")
   var rawProcDef, rawProcCall, rawProcParams: NimNode
   let callTyp = getTypeImpl(f[0])[0]
 
-  if isRaw:
+  if isRaw or isOptimized:
     let rawProc = genSym(nskProc, "rawProc")
     rawProcCall = newCall(rawProc)
     rawProcDef = quote do:
@@ -751,7 +861,7 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
     let argId = ident("arg" & $i)
     wrapperParams.add newIdentDefs(argId, t)
     wrapperCall.add(f[i + 1])
-    if isRaw:
+    if isRaw or isOptimized:
       rawProcParams.add newIdentDefs(argId, t)
       rawProcCall.add(argId)
     else:
@@ -760,31 +870,41 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
   if isRaw:
     rawProcParams.add newIdentDefs(ident"env", newCall("typeof", `subs`))
     rawProcCall.add(pEnv)
+
+  if isRaw or isOptimized:
     wrapperBody.add(rawProcDef)
     wrapperBody.add(rawProcCall)
 
-  result = quote do:
-    const `stateIdx` = getStateIdx(`substates`, `Env`)
-    template `subs`: untyped =
-      substateAtIndex(`substates`, `stateIdx`)
-    block:
+  if isOptimized:
+    let retTyp = newCall(bindSym"futureValueType", callTyp[0])# newCall("type", callTyp[0]))
+    wrapperParams[0] = retTyp
+    rawProcParams[0] = retTyp
+    result = quote do:
       `wrapperDef`
       `wrapperCall`
-
-  if isRaw:
-    result.add quote do:
-      if not `subs`.finished:
-        getHeader(`subs`[]).e = `thisEnv`
-        yield
-      read(`subs`[])
   else:
-    result.add quote do:
-      if launchf(cast[ptr ContBase](`subs`)):
-        getHeader(`subs`[]).e = `thisEnv`
-        yield
+    result = quote do:
+      const `stateIdx` = getStateIdx(`substates`, `Env`)
+      template `subs`: untyped =
+        substateAtIndex(`substates`, `stateIdx`)
+      block:
+        `wrapperDef`
+        `wrapperCall`
 
-      checkFinished(cast[ptr ContBase](`subs`))
-      readAux(`subs`[])
+    if isRaw:
+      result.add quote do:
+        if not `subs`.finished:
+          getHeader(`subs`[]).e = `thisEnv`
+          yield
+        read(`subs`[])
+    else:
+      result.add quote do:
+        if launchf(cast[ptr ContBase](`subs`)):
+          getHeader(`subs`[]).e = `thisEnv`
+          yield
+
+        checkFinished(cast[ptr ContBase](`subs`))
+        readAux(`subs`[])
 
 template await*[T](f: Future[T]): T =
   when compiles(checkVarDeclared(`<yasyncSubstates>`)):
@@ -811,6 +931,8 @@ template asyncLaunchWithEnv*(aenv: var AsyncEnv, call: FutureBase{nkCall}) =
     const procPtrName = asyncCallProcPtrName(call)
     when procPtrName.startsWith("yasync_raw_"):
       makeRawCall(call, addr aenv.env)
+    elif asyncCallOptimizable(call):
+      makeOptimizableCall(call, aenv.env)
     else:
       proc iterPtr(e: pointer) {.gcsafe, nimcall, importc: procPtrName.}
       getHeader(aenv.env).p = iterPtr

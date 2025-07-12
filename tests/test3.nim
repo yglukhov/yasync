@@ -101,3 +101,15 @@ proc generic4(a: typedesc, b, c: float): a {.async.} =
   await foo2()
 
 log waitFor generic4(int, 4, 5)
+
+
+expectOutput """
+1
+1
+0.0
+"""
+
+log waitFor generic4(float, 4, 5)
+
+var generic4Env: asyncCallEnvType(generic4(string, 4, 5))
+doAssert(sizeof(generic4Env) == sizeof(Cont[string]))

@@ -107,6 +107,9 @@ proc callEmpty() {.async.} =
 
 discard callEmpty()
 
+var emptyEnv: asyncCallEnvType(callEmpty())
+doAssert(sizeof(emptyEnv) == sizeof(Cont[void]))
+
 # asyncRaw implicit conversions
 expectOutput """
 10.0
