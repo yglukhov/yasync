@@ -21,9 +21,10 @@ iterator cartesianProduct[T](args: varargs[seq[T]]): seq[T] =
   var indices = newSeq[int](n)
   var exhausted = false
 
+  var combo = newSeqOfCap[T](args.len)
   while not exhausted:
     # Build current combination
-    var combo: seq[T] = @[]
+    combo.setLen(0)
     for i in 0..<n:
       combo.add args[i][indices[i]]
     yield combo

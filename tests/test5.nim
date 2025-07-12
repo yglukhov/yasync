@@ -112,7 +112,7 @@ block:
       a.o = newId()
 
   proc foo() {.async.} =
-    let a = SmartPtr(o: newId())
+    let a {.used.} = SmartPtr(o: newId())
     var b = SmartPtr(o: newId())
     log 1
     await sleep(1)

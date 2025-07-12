@@ -5,15 +5,15 @@ from yasync/compat import waitFor
 const asyncBackend {.strdefine.} = ""
 const useChronosBackend* = asyncBackend == "chronos"
 when useChronosBackend:
-  from chronos import nil
+  from chronos import milliseconds
   proc sleepRaw*(ms: int, env: ptr Cont[void]) {.asyncRaw.} =
-    chronos.addCallback(chronos.sleepAsync(ms)) do(p: pointer):
+    chronos.addCallback(chronos.sleepAsync(ms.milliseconds)) do(p: pointer):
       env.complete()
 
   proc sleep*(ms: int): Future[void] =
     result.new()
     let res = result
-    chronos.addCallback(chronos.sleepAsync(ms)) do(p: pointer):
+    chronos.addCallback(chronos.sleepAsync(ms.milliseconds)) do(p: pointer):
       res.complete()
 
 else:
