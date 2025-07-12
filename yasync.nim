@@ -190,13 +190,13 @@ proc read*(resFut: AsyncEnv): auto =
   checkFinished(cast[ptr ContBase](addr resFut))
   readAux(resFut.env)
 
-proc setCancelCb*[T: Cont](p: ptr T, cb: proc(p: ptr T) {.nimcall.}) {.silent.} =
+proc setCancelCb*[T: Cont](p: ptr T, cb: proc(p: ptr T) {.nimcall, raises: [].}) {.silent.} =
   p.h.p = cast[ProcType](cb)
 
 proc raiseCancelError(c: ptr ContBase) =
   c.fail(newException(CancelError, ""))
 
-proc cancel(c: ptr ContBase) =
+proc cancel(c: ptr ContBase) {.raises: [].} =
   type
     DummySubstates = object
       case sub: uint8
@@ -214,7 +214,8 @@ proc cancel(c: ptr ContBase) =
       let cancelProc = c.h.p
       if not cancelProc.isNil:
         c.h.p = nil
-        cancelProc(c)
+        {.cast(raises: []).}:
+          cancelProc(c)
 
       raiseCancelError(c)
       break
@@ -805,7 +806,6 @@ macro makeOptimizableCall(call: typed, env: typed): untyped =
   prc.params = prms
   prc.addPragma(ident"nimcall")
   prc.addPragma(newTree(nnkExprColonExpr, ident"importc", newLit(d.procPtrName)))
-  let name = newLit(d.procPtrName)
   result = quote do:
       `prc`
       try:
