@@ -4,16 +4,30 @@ from asyncdispatch import nil
 
 type
   SleepCont = object of Cont[void]
+    ppCont: ptr ptr SleepCont
     someParam: int
+
 
 proc onCancelSleep(env: ptr SleepCont) =
   log "sleep cancelled: ", env.someParam
+  if env.ppCont != nil:
+    env.ppCont[] = nil
 
 proc sleepRaw*(ms: int, env: ptr SleepCont) {.asyncRaw.} =
   env.someParam = 123
   log "sleeping"
+
+  var pEnv = env
+  env.ppCont = addr pEnv
+
+  # If sleepRaw is cancelled, env will be invalid pointer
+  # by the time sleepAsync completes.
+  # Because we can't cancel sleepAsync, we nullify pEnv in
+  # onCancelSleep.
   asyncdispatch.addCallback(asyncdispatch.sleepAsync(ms)) do():
-    env.complete()
+    let e = pEnv
+    if e != nil:
+      e.complete()
   setCancelCb(env, onCancelSleep)
 
 proc foo() {.async.} =
@@ -47,6 +61,7 @@ did cancel
 let f1 = sleepRaw(1000000)
 log "will cancel"
 f1.cancel()
+doAssert(f1.error of CancelError)
 log "did cancel"
 f1.cancel()
 
