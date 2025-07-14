@@ -516,7 +516,7 @@ proc asyncProc(prc: NimNode, isCapture: bool): NimNode =
   let subIdent = ident"<yasyncSubstates>"
   let optimizedProcSym = genSym(nskProc, name & ":real")
   let optimizedProcDef = copyNimTree(prc)
-  optimizedProcDef.name = optimizedProcSym
+  optimizedProcDef[0] = optimizedProcSym # change name, removing * if any
 
   block:
     # insert <yasyncSubstates> marker to optimized proc

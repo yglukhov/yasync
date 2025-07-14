@@ -38,18 +38,12 @@ waitFor logThis()
 waitFor logThis(2)
 waitFor logThis(1, 3)
 
+type BarEnv = asyncCallEnvType bar("hi")
 # The following expectations are for 64 bit architectures
 when defined(gcDestructors):
-  expectOutput """
-  Bar env size: 208
-  """
+  doAssert(sizeof(BarEnv) == 208)
 else:
-  expectOutput """
-  Bar env size: 200
-  """
-
-type BarEnv = asyncCallEnvType bar("hi")
-log "Bar env size: ", sizeof(BarEnv)
+  doAssert(sizeof(BarEnv) == 200)
 
 expectOutput """
 a: 5
@@ -97,7 +91,7 @@ expectOutput """
 2
 """
 
-proc emptyProc() {.async.} =
+proc emptyProc*() {.async.} =
   log 1
 
 proc callEmpty() {.async.} =
