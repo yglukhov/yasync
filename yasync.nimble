@@ -10,8 +10,8 @@ license       = "MIT"
 
 requires "nim >= 2.2"
 
-dev:
-  requires "chronos"
+when defined(taskRequires):
+  taskRequires "test", "chronos"
 
 iterator cartesianProduct[T](args: varargs[seq[T]]): seq[T] =
   ## Yields all combinations (Cartesian product) from varargs of seq[string]
