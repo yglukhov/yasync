@@ -10,8 +10,7 @@ license       = "MIT"
 
 requires "nim >= 2.2"
 
-when defined(taskRequires):
-  taskRequires "test", "chronos"
+taskRequires "test", "chronos"
 
 iterator cartesianProduct[T](args: varargs[seq[T]]): seq[T] =
   ## Yields all combinations (Cartesian product) from varargs of seq[string]
@@ -44,6 +43,8 @@ iterator cartesianProduct[T](args: varargs[seq[T]]): seq[T] =
 import std/[oswalkdir, strutils, os]
 
 task test, "Run tests":
+  let deps = getPathsClause()
+
   for f in oswalkdir.walkDir("tests"):
     # Run all nim modules starting with "t"
     let sf = f.path.splitFile()
@@ -55,5 +56,5 @@ task test, "Run tests":
           # @["--mm:orc"],
           @["-d:asyncBackend=asyncdispatch", "-d:asyncBackend=chronos"]):
           # @["-d:asyncBackend=asyncdispatch"]):
-        echo "RUNNING TEST: nim " & args.join(" ") & " " & f.path
-        exec "nim " & args.join(" ") & " " & f.path
+        echo "RUNNING TEST: nim " & args.join(" ") & " " & deps & " " & f.path
+        exec "nim " & args.join(" ") & " " & deps & " " & f.path
