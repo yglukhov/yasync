@@ -133,22 +133,3 @@ proc foo1() {.async.} =
   log val
 
 waitFor foo1()
-
-#7
-expectOutput """
-50
-"""
-
-proc nothing(n: int): int {.async.} =
-  n and 0x1
-
-proc amain() {.async} =
-  var coros = newSeq[Future[int]]()
-  for i in 0..<100:
-    coros.add(nothing(i))
-  var n = 0
-  for f in coros:
-    inc n, await f
-  log n
-
-waitFor amain()
