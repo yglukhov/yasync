@@ -56,6 +56,30 @@ block:
     log waitFor foo(5)
   test()
 
+block: #8
+  expectOutput """
+  hi
+  8
+  7
+  6
+  5
+  123
+  """
+  proc test() =
+    var a = "hi"
+    var s = @[8, 7, 6]
+    proc foo(b: int): int {.asyncClosureExperimental.} =
+      log a
+      try:
+        await sleep(10)
+        for i in s:
+          log i
+      finally:
+        log b
+      123
+    log waitFor foo(5)
+  test()
+
 block:
   expectOutput """
   1
