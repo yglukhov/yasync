@@ -418,7 +418,7 @@ proc makeAsyncProcBody(prc, iterSym: NimNode, isCapture: bool): NimNode =
 
     GC_ref(`envSym`)
     markAllocatedEnv(cast[ptr ContBase](`envSym`))
-    result = cast[typeof(result)](`envSym`)
+    result = cast[typeof(result)](cast[pointer](`envSym`))
     setProc(getHeader(`envSym`[]), cast[ProcType](rawProc(it)))
     when not `isCapture`:
       `fillArgs`
