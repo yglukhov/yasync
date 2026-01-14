@@ -744,7 +744,12 @@ proc tmpFutSubstate[T](sub: var T): var FutureBase {.silent.} =
     {.pop.}
 
 proc resetSubstate[T](s: var T, idx: uint8) {.silent.} =
-  s = T(sub: idx)
+  # The following line is suboptimal, see nim issue #25438
+  # s = T(sub: idx)
+  reset(s)
+  {.push checks: off.}
+  s.sub = idx
+  {.pop.}
 
 proc setTmpFutSubstate[T](sub: var T, f: FutureBase) {.silent.} =
   sub.resetSubstate(0)
