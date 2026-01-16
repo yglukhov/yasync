@@ -869,7 +869,8 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
 
   for i, _, t, d in arguments(callTyp):
     let argId = ident("arg" & $i)
-    wrapperParams.add newIdentDefs(argId, t)
+    let paramType = if t.kind == nnkVarTy: t else: newTree(nnkBracketExpr, ident"sink", t)
+    wrapperParams.add newIdentDefs(argId, paramType)
     wrapperCall.add(f[i + 1])
     if isRaw or isOptimized:
       rawProcParams.add newIdentDefs(argId, t)
