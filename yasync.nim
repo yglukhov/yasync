@@ -746,13 +746,17 @@ proc tmpFutSubstate[T](sub: var T): var FutureBase {.silent.} =
 proc resetSubstate[T](s: var T, idx: uint8) {.silent.} =
   # The following line is suboptimal, see nim issue #25438
   # s = T(sub: idx)
+
+  # Note this nullifies only the first few bytes of s,
+  # additional zeroMem must be done over corresponding substate
   reset(s)
   {.push checks: off.}
   s.sub = idx
   {.pop.}
 
 proc setTmpFutSubstate[T](sub: var T, f: FutureBase) {.silent.} =
-  sub.resetSubstate(0)
+  # Resets sub.sub, and sub.tmpFut
+  reset(sub)
   sub.tmpFutSubstate() = f
 
 macro fillArgs(subAccess: untyped, n: typed): untyped =
@@ -838,6 +842,7 @@ macro awaitSubstateImpl(substates: typed, Env: typedesc, f: ref Cont, thisEnv: u
       proc `setupEnv`(substates: var object) {.stacktrace: off, inline.} =
         substates.resetSubstate(`stateIdx`)
         let `pEnv` = substateAtIndex(substates, `stateIdx`)
+        zeroMem(`pEnv`, sizeof(`pEnv`[]))
     wrapperCall = newCall(setupEnv, substates)
   else:
     wrapperDef = quote do:
