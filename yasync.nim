@@ -179,10 +179,11 @@ proc read*[T](resFut: Future[T]): T =
     return resFut.result
 
 proc readAux[T](a: T): auto {.silent.} =
-  when T is Cont and compiles(a.result):
-    a.result
-  elif compiles(a.result2):
+  # XXX: "result2" is backward compatibility with nim up to 2.2.12
+  when compiles(a.result2):
     a.result2
+  elif compiles(a.result):
+    a.result
   else:
     discard
 
@@ -316,7 +317,8 @@ macro argFieldAccess(o: typed, idx: static[int]): untyped =
   t.expectKind(nnkObjectTy)
   let rl = t[2]
   var idx = idx + 3
-  if $rl[2] == "result2": inc idx
+  # XXX: "result2" is backward compatibility with nim up to 2.2.12
+  if $rl[2] in ["result", "result2"]: inc idx
   result = newDotExpr(o, rl[idx])
 
 template fillArg[TEnv, TArg](e: var TEnv, idx: int, arg: TArg) =
